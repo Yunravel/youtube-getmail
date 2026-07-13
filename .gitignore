@@ -1,0 +1,9 @@
+config.json
+output/
+logs/
+__pycache__/
+*.pyc
+.venv/
+.playwright-cli/
+build/
+*.spec
