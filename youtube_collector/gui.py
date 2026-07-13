@@ -59,6 +59,8 @@ class App(tk.Tk):
         self.api_key = tk.StringVar()
         self.collection_mode = tk.StringVar(value="api")
         self.show_browser = tk.BooleanVar(value=False)
+        self.email_only = tk.BooleanVar(value=False)
+        self.scan_public_websites = tk.BooleanVar(value=True)
         self.keywords = tk.StringVar()
         self.countries = tk.StringVar()
         self.min_subs = tk.StringVar(value="0")
@@ -123,6 +125,21 @@ class App(tk.Tk):
         self.show_browser_check.grid(row=row, column=1, columnspan=3, sticky="w")
         row += 1
 
+        ttk.Label(frame, text="邮箱采集").grid(row=row, column=0, sticky="w", pady=7)
+        email_frame = ttk.Frame(frame)
+        email_frame.grid(row=row, column=1, columnspan=3, sticky="w")
+        self.email_only_check = ttk.Checkbutton(
+            email_frame, text="只保存有邮箱或需人工验证的频道", variable=self.email_only
+        )
+        self.email_only_check.pack(side="left")
+        self.scan_websites_check = ttk.Checkbutton(
+            email_frame,
+            text="简介无邮箱时检查频道公开官网",
+            variable=self.scan_public_websites,
+        )
+        self.scan_websites_check.pack(side="left", padx=(16, 0))
+        row += 1
+
         ttk.Label(frame, text="CSV 输出").grid(row=row, column=0, sticky="w", pady=7)
         ttk.Entry(frame, textvariable=self.output).grid(row=row, column=1, columnspan=2, sticky="ew")
         ttk.Button(frame, text="选择…", command=self._choose_output).grid(row=row, column=3, padx=(8, 0))
@@ -156,6 +173,8 @@ class App(tk.Tk):
             "youtube_api_key": self.api_key.get().strip(),
             "collection_mode": self.collection_mode.get(),
             "show_browser": self.show_browser.get(),
+            "email_only": self.email_only.get(),
+            "scan_public_websites": self.scan_public_websites.get(),
             "request_interval_seconds": 0.2,
             "request_timeout_seconds": 30,
         }
@@ -179,6 +198,8 @@ class App(tk.Tk):
                     self.api_key.set(key)
                 self.collection_mode.set(data.get("collection_mode", "api"))
                 self.show_browser.set(bool(data.get("show_browser", False)))
+                self.email_only.set(bool(data.get("email_only", False)))
+                self.scan_public_websites.set(bool(data.get("scan_public_websites", True)))
                 self._on_mode_change()
             except (OSError, ValueError):
                 pass
@@ -195,7 +216,16 @@ class App(tk.Tk):
         if maximum and minimum > maximum:
             raise ValueError("粉丝数下限不能大于上限。")
         countries = {x.strip().upper() for x in self.countries.get().split("|") if x.strip()}
-        return CollectOptions(keywords, countries, minimum, maximum, pages, Path(self.output.get()))
+        return CollectOptions(
+            keywords,
+            countries,
+            minimum,
+            maximum,
+            pages,
+            Path(self.output.get()),
+            email_only=self.email_only.get(),
+            scan_public_websites=self.scan_public_websites.get(),
+        )
 
     def _start(self) -> None:
         try:
@@ -246,6 +276,7 @@ class App(tk.Tk):
         crawler = self.collection_mode.get() == "crawler"
         self.api_key_entry.configure(state="disabled" if crawler else "normal")
         self.show_browser_check.configure(state="normal" if crawler else "disabled")
+        self.scan_websites_check.configure(state="normal" if crawler else "disabled")
 
     def _drain_events(self) -> None:
         try:

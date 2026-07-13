@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 
 from .collector import CSV_FIELDS, CollectOptions
 from .contact_parser import extract_public_contacts
+from .email_finder import PublicEmailFinder
 
 
 class CrawlerError(RuntimeError):
@@ -46,6 +47,20 @@ COUNTRY_ALIASES = {
     "HK": {"HK", "HONG KONG", "香港"},
     "TW": {"TW", "TAIWAN", "台湾", "台灣"},
 }
+EMAIL_VERIFICATION_MARKERS = (
+    "view email address",
+    "sign in to view email address",
+    "sign in to see email address",
+    "verify to view email address",
+    "see email address",
+    "查看电子邮件地址",
+    "查看电邮地址",
+    "查看電子郵件地址",
+    "才能查看电子邮件地址",
+    "才能查看電子郵件地址",
+    "i'm not a robot",
+    "recaptcha",
+)
 
 
 def parse_localized_number(text: str) -> int:
@@ -108,6 +123,34 @@ def unwrap_youtube_redirect(url: str) -> str:
     return url
 
 
+def requires_email_verification(text: str) -> bool:
+    normalized = (text or "").casefold()
+    return any(marker in normalized for marker in EMAIL_VERIFICATION_MARKERS)
+
+
+def classify_email_status(email: str, verification_required: bool) -> str:
+    if email and verification_required:
+        return "已获取；另有需人工验证的商务邮箱"
+    if email:
+        return "已获取"
+    if verification_required:
+        return "需人工验证（登录/reCAPTCHA）"
+    return "未发现"
+
+
+def _merge_contacts(*groups: dict[str, str]) -> dict[str, str]:
+    keys = groups[0].keys() if groups else ()
+    merged: dict[str, str] = {}
+    for key in keys:
+        values: list[str] = []
+        for group in groups:
+            for value in group.get(key, "").split(" | "):
+                if value and value not in values:
+                    values.append(value)
+        merged[key] = " | ".join(values)
+    return merged
+
+
 def parse_about_rows(rows: list[str]) -> dict[str, object]:
     result: dict[str, object] = {
         "country": "",
@@ -160,6 +203,8 @@ class BrowserCrawler:
         options.output_file.parent.mkdir(parents=True, exist_ok=True)
         exists = options.output_file.exists() and options.output_file.stat().st_size > 0
         written = 0
+        email_rows = 0
+        verification_rows = 0
         seen: set[tuple[str, str]] = set()
 
         with sync_playwright() as playwright:
@@ -174,6 +219,7 @@ class BrowserCrawler:
             )
             page = context.new_page()
             page.set_default_timeout(self.timeout_ms)
+            email_finder = PublicEmailFinder(status=self._emit, interval=min(self.interval, 0.5))
 
             try:
                 with options.output_file.open("a", newline="", encoding="utf-8-sig") as handle:
@@ -215,10 +261,40 @@ class BrowserCrawler:
                             if not country_matches(country, options.countries):
                                 continue
 
-                            contacts = extract_public_contacts(
-                                "\n".join([str(channel["description"]), *channel["links"]])
-                            )
+                            description_contacts = extract_public_contacts(str(channel["description"]))
+                            link_contacts = extract_public_contacts("\n".join(channel["links"]))
+                            contacts = _merge_contacts(description_contacts, link_contacts)
+                            verification_required = bool(channel["email_verification_required"])
+                            if description_contacts["email"]:
+                                email_note = "频道公开简介"
+                            elif link_contacts["email"]:
+                                email_note = "频道公开链接"
+                            else:
+                                email_note = ""
+                            if not contacts["email"] and options.scan_public_websites:
+                                discovery = email_finder.find(channel["links"])
+                                if discovery.emails:
+                                    contacts["email"] = " | ".join(discovery.emails)
+                                    hosts = sorted(
+                                        {
+                                            urlparse(source).netloc
+                                            for source in discovery.sources.values()
+                                            if urlparse(source).netloc
+                                        }
+                                    )
+                                    email_note = "公开官网：" + "、".join(hosts)
+                                    self._emit(f"该频道找到 {len(discovery.emails)} 个公开邮箱")
+                            if options.email_only and not contacts["email"] and not verification_required:
+                                self._emit("未找到公开邮箱，按设置跳过该频道")
+                                continue
                             has_contacts = any(contacts.values())
+                            email_status = classify_email_status(
+                                contacts["email"], verification_required
+                            )
+                            if contacts["email"] and verification_required:
+                                email_note += "；频道另有邮箱入口，需登录/人工验证"
+                            elif verification_required:
+                                email_note = "频道提供商务邮箱入口，需人工打开频道简介完成验证"
                             row = {
                                 "搜索关键词": keyword,
                                 "页码": index // 50 + 1,
@@ -240,12 +316,19 @@ class BrowserCrawler:
                                 "视频总数": channel["video_count"],
                                 "总观看次数": channel["view_count"],
                                 "注册日期": channel["published_at"],
-                                "联系说明": "来自频道公开简介及公开外链" if has_contacts else "未发现公开联系方式",
+                                "联系说明": email_note if contacts["email"] else ("发现公开社媒，但未发现邮箱" if has_contacts else "未发现公开联系方式"),
                                 "联系详情": contacts["email"],
+                                "邮箱状态": email_status,
                             }
+                            if verification_required and not contacts["email"]:
+                                row["联系说明"] = email_note
                             writer.writerow(row)
                             handle.flush()
                             written += 1
+                            if contacts["email"]:
+                                email_rows += 1
+                            if verification_required:
+                                verification_rows += 1
                             self._emit(f"已保存 {written} 条：{row['博主名称']}")
                             if self.interval:
                                 time.sleep(self.interval)
@@ -253,7 +336,14 @@ class BrowserCrawler:
                 context.close()
                 browser.close()
 
-        self._emit("已停止" if stop_event.is_set() else f"爬虫采集完成，共新增 {written} 条")
+        self._emit(
+            "已停止"
+            if stop_event.is_set()
+            else (
+                f"爬虫采集完成，共新增 {written} 条，其中 {email_rows} 条含公开邮箱，"
+                f"{verification_rows} 条标记为需人工验证"
+            )
+        )
         return written
 
     def _launch_browser(self, playwright):
@@ -362,7 +452,8 @@ class BrowserCrawler:
                     rows,
                     links,
                     canonical_url: canonical,
-                    channel_id: identifier
+                    channel_id: identifier,
+                    dialog_text: dialog?.innerText || ''
                 };
             }"""
         )
@@ -375,6 +466,7 @@ class BrowserCrawler:
                 "links": [unwrap_youtube_redirect(link) for link in data.get("links", [])],
                 "canonical_url": data.get("canonical_url", channel_url),
                 "channel_id": data.get("channel_id", ""),
+                "email_verification_required": requires_email_verification(data.get("dialog_text", "")),
             }
         )
         return details

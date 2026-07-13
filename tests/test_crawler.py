@@ -1,9 +1,11 @@
 import unittest
 
 from youtube_collector.crawler import (
+    classify_email_status,
     country_matches,
     parse_about_rows,
     parse_localized_number,
+    requires_email_verification,
     unwrap_youtube_redirect,
 )
 
@@ -42,6 +44,19 @@ class CrawlerParserTests(unittest.TestCase):
     def test_unwraps_public_redirect_link(self):
         url = "https://www.youtube.com/redirect?event=channel_description&q=https%3A%2F%2Finstagram.com%2Fdemo"
         self.assertEqual(unwrap_youtube_redirect(url), "https://instagram.com/demo")
+
+    def test_detects_login_or_captcha_email_gate(self):
+        self.assertTrue(requires_email_verification("需登录才能查看电子邮件地址"))
+        self.assertTrue(requires_email_verification("View email address"))
+        self.assertTrue(requires_email_verification("Sign in to see email address"))
+        self.assertTrue(requires_email_verification("I'm not a robot reCAPTCHA"))
+        self.assertFalse(requires_email_verification("Email: public@creator.test"))
+
+    def test_email_status_variants(self):
+        self.assertEqual(classify_email_status("public@creator.test", False), "已获取")
+        self.assertIn("另有需人工验证", classify_email_status("public@creator.test", True))
+        self.assertIn("需人工验证", classify_email_status("", True))
+        self.assertEqual(classify_email_status("", False), "未发现")
 
 
 if __name__ == "__main__":

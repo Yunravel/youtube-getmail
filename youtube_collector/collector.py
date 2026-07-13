@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -15,7 +15,7 @@ CSV_FIELDS = [
     "搜索关键词", "页码", "视频标题", "视频链接", "当前视频播放数", "博主名称",
     "博主链接", "频道ID", "频道链接", "国家", "电报链接", "WhatsApp链接",
     "推特链接", "脸书链接", "Instagram链接", "TikTok链接", "粉丝数", "视频总数",
-    "总观看次数", "注册日期", "联系说明", "联系详情",
+    "总观看次数", "注册日期", "联系说明", "联系详情", "邮箱状态",
 ]
 
 
@@ -27,6 +27,8 @@ class CollectOptions:
     max_subscribers: int
     pages: int
     output_file: Path
+    email_only: bool = False
+    scan_public_websites: bool = True
 
 
 def _number(value: object) -> int:
@@ -88,14 +90,7 @@ class YouTubeCollector:
         options.output_file.parent.mkdir(parents=True, exist_ok=True)
         country_codes = _resolve_countries(self.api, options.countries)
         if country_codes:
-            options = CollectOptions(
-                options.keywords,
-                country_codes,
-                options.min_subscribers,
-                options.max_subscribers,
-                options.pages,
-                options.output_file,
-            )
+            options = replace(options, countries=country_codes)
         already_exists = options.output_file.exists() and options.output_file.stat().st_size > 0
         written = 0
         seen: set[tuple[str, str]] = set()
@@ -146,6 +141,8 @@ class YouTubeCollector:
                             continue
 
                         contacts = extract_public_contacts(snippet.get("description", ""))
+                        if options.email_only and not contacts["email"]:
+                            continue
                         contact_values = [v for v in contacts.values() if v]
                         custom = snippet.get("customUrl", "")
                         public_url = f"https://www.youtube.com/{custom}" if custom else f"https://www.youtube.com/channel/{channel_id}"
@@ -172,6 +169,7 @@ class YouTubeCollector:
                             "注册日期": snippet.get("publishedAt", ""),
                             "联系说明": "仅解析频道公开简介" if contact_values else "未在公开简介中发现",
                             "联系详情": contacts["email"],
+                            "邮箱状态": "已获取" if contacts["email"] else "未发现（API 模式无法判断人工验证入口）",
                         }
                         writer.writerow(row)
                         handle.flush()

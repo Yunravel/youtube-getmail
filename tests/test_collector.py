@@ -69,11 +69,13 @@ class FakeApi:
 
 
 class CollectorTests(unittest.TestCase):
-    def test_end_to_end_writes_filtered_deduplicated_22_column_csv(self):
+    def test_end_to_end_writes_filtered_deduplicated_csv(self):
         api = FakeApi()
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "result.csv"
-            options = CollectOptions(["beauty"], {"美国"}, 10000, 100000, 2, output)
+            options = CollectOptions(
+                ["beauty"], {"美国"}, 10000, 100000, 2, output, email_only=True
+            )
             count = YouTubeCollector(api, logging.getLogger("test")).run(
                 options, threading.Event()
             )
@@ -84,7 +86,7 @@ class CollectorTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 1)
             self.assertEqual(list(rows[0]), CSV_FIELDS)
-            self.assertEqual(len(CSV_FIELDS), 22)
+            self.assertEqual(len(CSV_FIELDS), 23)
             self.assertEqual(rows[0]["博主名称"], "Creator One")
             self.assertEqual(rows[0]["联系详情"], "hello@example.com")
             self.assertEqual(rows[0]["Instagram链接"], "https://instagram.com/creator")
