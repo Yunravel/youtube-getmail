@@ -7,7 +7,7 @@
 - 多关键词（用 `|` 分隔）和多国家/地区筛选，国家支持中文、英文或两位代码
 - 订阅数上下限、每个关键词页数控制
 - 批量读取频道与视频数据，频道按“关键词 + 频道 ID”去重
-- 22 列 CSV，UTF-8 BOM 编码，可直接用 Excel 打开
+- 23 列 CSV，UTF-8 BOM 编码，可直接用 Excel 打开
 - 从频道公开简介识别邮箱、Telegram、WhatsApp、X/Twitter、Facebook、Instagram、TikTok
 - 邮箱优先：简介没有邮箱时，可限量检查频道主动公开的官网及 Contact/About 页面
 - 可选择“只保存有邮箱或需人工验证的频道”，邮箱写入“联系详情”列
@@ -21,6 +21,8 @@
 ### Windows 免安装版
 
 直接双击 [`dist/YouTubeCollector.exe`](dist/YouTubeCollector.exe)。`config.json`、`logs` 和 `output` 会建立在 EXE 所在目录。API 模式需要填写 Key，爬虫模式不需要。
+
+完整的界面操作、邮箱状态说明和故障排查请阅读 [`使用说明.md`](使用说明.md)。
 
 ### 两种采集方式
 

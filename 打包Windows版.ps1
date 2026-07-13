@@ -22,6 +22,6 @@ if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed." }
     main.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed. Close a running YouTubeCollector.exe and retry." }
 
-Copy-Item -Force README.md dist\README.md
+Copy-Item -Force *.md dist\
 Copy-Item -Force config.example.json dist\config.example.json
 Write-Host "Build complete: dist\YouTubeCollector.exe"
