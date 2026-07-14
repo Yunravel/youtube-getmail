@@ -1,0 +1,9 @@
+{
+  "youtube_api_key": "把你的 YouTube Data API v3 Key 填在这里",
+  "collection_mode": "api",
+  "show_browser": false,
+  "email_only": false,
+  "scan_public_websites": true,
+  "request_interval_seconds": 0.2,
+  "request_timeout_seconds": 20
+}
