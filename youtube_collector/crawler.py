@@ -151,6 +151,19 @@ def _merge_contacts(*groups: dict[str, str]) -> dict[str, str]:
     return merged
 
 
+def _new_emails(before: str, after: str) -> list[str]:
+    before_emails = {
+        email.strip().casefold()
+        for email in extract_public_contacts(before).get("email", "").split("|")
+        if email.strip()
+    }
+    return [
+        email.strip()
+        for email in extract_public_contacts(after).get("email", "").split("|")
+        if email.strip() and email.strip().casefold() not in before_emails
+    ]
+
+
 def parse_about_rows(rows: list[str]) -> dict[str, object]:
     result: dict[str, object] = {
         "country": "",
@@ -187,12 +200,16 @@ class BrowserCrawler:
         show_browser: bool = False,
         interval: float = 0.8,
         timeout_seconds: float = 30,
+        profile_dir: Path | None = None,
+        reveal_gated_email: bool = False,
     ):
         self.logger = logger
         self.status = status or (lambda _message: None)
         self.show_browser = show_browser
         self.interval = interval
         self.timeout_ms = int(timeout_seconds * 1000)
+        self.profile_dir = Path(profile_dir) if profile_dir else None
+        self.reveal_gated_email = reveal_gated_email
 
     def run(self, options: CollectOptions, stop_event: threading.Event) -> int:
         try:
@@ -208,15 +225,7 @@ class BrowserCrawler:
         seen: set[tuple[str, str]] = set()
 
         with sync_playwright() as playwright:
-            browser = self._launch_browser(playwright)
-            context = browser.new_context(
-                locale="en-US",
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
-                ),
-                viewport={"width": 1365, "height": 900},
-            )
+            context = self._launch_context(playwright)
             page = context.new_page()
             page.set_default_timeout(self.timeout_ms)
             email_finder = PublicEmailFinder(status=self._emit, interval=min(self.interval, 0.5))
@@ -263,9 +272,16 @@ class BrowserCrawler:
 
                             description_contacts = extract_public_contacts(str(channel["description"]))
                             link_contacts = extract_public_contacts("\n".join(channel["links"]))
-                            contacts = _merge_contacts(description_contacts, link_contacts)
+                            revealed_contacts = extract_public_contacts(
+                                str(channel.get("revealed_email", ""))
+                            )
+                            contacts = _merge_contacts(
+                                description_contacts, link_contacts, revealed_contacts
+                            )
                             verification_required = bool(channel["email_verification_required"])
-                            if description_contacts["email"]:
+                            if revealed_contacts["email"]:
+                                email_note = "YouTube 查看电子邮件地址"
+                            elif description_contacts["email"]:
                                 email_note = "频道公开简介"
                             elif link_contacts["email"]:
                                 email_note = "频道公开链接"
@@ -284,6 +300,17 @@ class BrowserCrawler:
                                     )
                                     email_note = "公开官网：" + "、".join(hosts)
                                     self._emit(f"该频道找到 {len(discovery.emails)} 个公开邮箱")
+                            if (
+                                self.reveal_gated_email
+                                and not contacts["email"]
+                                and verification_required
+                            ):
+                                revealed_email = self._reveal_channel_email(page)
+                                if revealed_email:
+                                    revealed_contacts = extract_public_contacts(revealed_email)
+                                    contacts = _merge_contacts(contacts, revealed_contacts)
+                                    verification_required = False
+                                    email_note = "YouTube 查看电子邮件地址"
                             if options.email_only and not contacts["email"] and not verification_required:
                                 self._emit("未找到公开邮箱，按设置跳过该频道")
                                 continue
@@ -334,7 +361,6 @@ class BrowserCrawler:
                                 time.sleep(self.interval)
             finally:
                 context.close()
-                browser.close()
 
         self._emit(
             "已停止"
@@ -360,6 +386,71 @@ class BrowserCrawler:
         raise CrawlerError(
             "未找到可用的 Chrome 或 Edge 浏览器。请先安装其中一个。\n" + "\n".join(errors)
         )
+
+    def _launch_context(self, playwright, force_headed: bool = False):
+        options = {
+            "locale": "en-US",
+            "user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
+            ),
+            "viewport": {"width": 1365, "height": 900},
+        }
+        if not self.profile_dir:
+            browser = self._launch_browser(playwright)
+            return browser.new_context(**options)
+
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        errors = []
+        for channel in ("chrome", "msedge"):
+            try:
+                return playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(self.profile_dir),
+                    channel=channel,
+                    headless=False if force_headed else not self.show_browser,
+                    args=["--disable-blink-features=AutomationControlled"],
+                    **options,
+                )
+            except Exception as exc:
+                errors.append(f"{channel}: {exc}")
+        raise CrawlerError(
+            "无法打开登录浏览器配置。请确认没有其他采集或登录窗口正在使用它。\n"
+            + "\n".join(errors)
+        )
+
+    def manual_login(self) -> None:
+        """Open a headed persistent browser so the user can establish a login session."""
+        if not self.profile_dir:
+            raise CrawlerError("未配置浏览器登录状态保存目录。")
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise CrawlerError("缺少浏览器组件，请重新运行“启动工具.cmd”安装依赖。") from exc
+
+        with sync_playwright() as playwright:
+            context = self._launch_context(playwright, force_headed=True)
+            page = context.pages[0] if context.pages else context.new_page()
+            page.set_default_timeout(self.timeout_ms)
+            try:
+                page.goto(
+                    "https://accounts.google.com/ServiceLogin?service=youtube&continue=https://www.youtube.com/",
+                    wait_until="domcontentloaded",
+                    timeout=self.timeout_ms,
+                )
+                self._emit("请在浏览器中手动登录 Google/YouTube；完成后直接关闭整个登录浏览器窗口。")
+                while True:
+                    try:
+                        pages = context.pages
+                        if not pages:
+                            break
+                        pages[0].wait_for_timeout(500)
+                    except Exception:
+                        break
+            finally:
+                try:
+                    context.close()
+                except Exception:
+                    pass
 
     def _search_results(
         self,
@@ -466,10 +557,86 @@ class BrowserCrawler:
                 "links": [unwrap_youtube_redirect(link) for link in data.get("links", [])],
                 "canonical_url": data.get("canonical_url", channel_url),
                 "channel_id": data.get("channel_id", ""),
-                "email_verification_required": requires_email_verification(data.get("dialog_text", "")),
+                "revealed_email": "",
+                "email_verification_required": requires_email_verification(
+                    data.get("dialog_text", "")
+                ),
             }
         )
         return details
+
+    def _reveal_channel_email(self, page) -> str:
+        """Click YouTube's email button and wait for a user-solved CAPTCHA when visible."""
+        try:
+            if not page.locator("#avatar-btn").count():
+                self._emit("当前浏览器尚未登录，无法自动点击“查看电子邮件地址”。")
+                return ""
+            dialogs = page.locator("tp-yt-paper-dialog[role=dialog]")
+            dialog = dialogs.filter(has=page.locator("ytd-about-channel-renderer")).first
+            before = dialog.inner_text(timeout=3_000)
+        except Exception:
+            return ""
+
+        button = None
+        for label in ("查看电子邮件地址", "查看电子邮箱地址", "View email address"):
+            try:
+                candidate = page.get_by_role("button", name=label, exact=False)
+                if candidate.count():
+                    button = candidate.first
+                    break
+                text = dialog.get_by_text(label, exact=True)
+                if text.count():
+                    candidate = text.first.locator("xpath=ancestor::button[1]")
+                    if candidate.count():
+                        button = candidate
+                        break
+            except Exception:
+                continue
+        if button is None:
+            return ""
+
+        try:
+            button.click(timeout=5_000)
+            self._emit("已自动点击“查看电子邮件地址”。")
+        except Exception as exc:
+            self.logger.info("无法点击查看电子邮件地址：%s", exc)
+            return ""
+
+        normal_deadline = time.monotonic() + 8
+        captcha_deadline: float | None = None
+        captcha_announced = False
+        while time.monotonic() < (captcha_deadline or normal_deadline):
+            try:
+                page.wait_for_timeout(500)
+                after = dialog.inner_text(timeout=2_000)
+                emails = _new_emails(before, after)
+                if emails:
+                    self._emit(f"已从 YouTube 邮箱入口获取 {len(emails)} 个邮箱。")
+                    return " | ".join(emails)
+                body_text = page.locator("body").inner_text(timeout=2_000).casefold()
+                captcha_visible = bool(
+                    page.locator('iframe[src*="recaptcha"], iframe[title*="reCAPTCHA"]').count()
+                ) or any(
+                    marker in body_text
+                    for marker in (
+                        "i'm not a robot",
+                        "recaptcha",
+                        "进行人机身份验证",
+                        "進行人機身分驗證",
+                    )
+                )
+                if captcha_visible and not captcha_announced:
+                    captcha_announced = True
+                    if not self.show_browser:
+                        self._emit("邮箱入口要求 reCAPTCHA；请勾选“显示浏览器窗口”后重试。")
+                        return ""
+                    captcha_deadline = time.monotonic() + 20
+                    self._emit("请在浏览器中完成邮箱验证码；程序最多等待 20 秒。")
+            except Exception:
+                break
+        if captcha_announced:
+            self._emit("等待邮箱验证超时，本频道标记为需人工验证。")
+        return ""
 
     @staticmethod
     def _dismiss_consent(page) -> None:

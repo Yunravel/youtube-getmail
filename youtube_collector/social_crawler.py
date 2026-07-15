@@ -40,7 +40,10 @@ class ProfileResult:
 
 def normalize_platform(value: object) -> str:
     platform = str(value or "").strip().casefold()
-    return "x" if platform == "twitter" else platform
+    compact = re.sub(r"[\s/_-]+", "", platform)
+    if compact in {"x", "twitter", "twitterx", "xtwitter"}:
+        return "x"
+    return platform
 
 
 def profile_url(platform: str, account: object, raw_url: object) -> str:
@@ -148,6 +151,8 @@ class SocialProfileCrawler:
         interval: float = 1.0,
         timeout_seconds: float = 30,
         scan_public_websites: bool = True,
+        profile_dir: Path | None = None,
+        reveal_gated_email: bool = False,
     ):
         self.logger = logger
         self.status = status or (lambda _message: None)
@@ -157,7 +162,8 @@ class SocialProfileCrawler:
         self.scan_public_websites = scan_public_websites
         self.youtube = BrowserCrawler(
             logger, self.status, show_browser=show_browser, interval=interval,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=timeout_seconds, profile_dir=profile_dir,
+            reveal_gated_email=reveal_gated_email,
         )
 
     def crawl_excel(
@@ -181,7 +187,11 @@ class SocialProfileCrawler:
             raise RuntimeError("缺少 playwright，请执行：python -m pip install -r requirements.txt") from exc
 
         stop_event = stop_event or threading.Event()
-        workbook = load_workbook(input_file)
+        resume_from_output = output_file.is_file() and output_file.resolve() != input_file.resolve()
+        workbook_source = output_file if resume_from_output else input_file
+        workbook = load_workbook(workbook_source)
+        if resume_from_output:
+            self._emit(f"检测到已有结果文件，将续跑并跳过已读取行：{output_file}")
         if sheet_name not in workbook.sheetnames:
             raise ValueError(f"找不到工作表：{sheet_name}")
         sheet = workbook[sheet_name]
@@ -198,17 +208,10 @@ class SocialProfileCrawler:
         wanted = {normalize_platform(x) for x in (platforms or SUPPORTED_PLATFORMS)}
         output_file.parent.mkdir(parents=True, exist_ok=True)
         processed = 0
+        skipped = 0
 
         with sync_playwright() as playwright:
-            browser = self.youtube._launch_browser(playwright)
-            context = browser.new_context(
-                locale="en-US",
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
-                ),
-                viewport={"width": 1365, "height": 900},
-            )
+            context = self.youtube._launch_context(playwright)
             page = context.new_page()
             page.set_default_timeout(self.timeout_ms)
             finder = PublicEmailFinder(
@@ -222,6 +225,9 @@ class SocialProfileCrawler:
                         break
                     platform = normalize_platform(sheet.cell(row_number, headers["平台"]).value)
                     if platform not in wanted:
+                        continue
+                    if self._row_already_processed(sheet, row_number, result_columns):
+                        skipped += 1
                         continue
                     account = sheet.cell(row_number, headers["账号"]).value
                     url = profile_url(
@@ -241,14 +247,13 @@ class SocialProfileCrawler:
                     self._write_result(sheet, row_number, result_columns, result)
                     processed += 1
                     if processed % 5 == 0:
-                        workbook.save(output_file)
+                        self._save_workbook(workbook, output_file)
                     if self.interval:
                         time.sleep(self.interval)
             finally:
-                workbook.save(output_file)
+                self._save_workbook(workbook, output_file)
                 context.close()
-                browser.close()
-        self._emit(f"已处理 {processed} 条，结果保存至：{output_file}")
+        self._emit(f"本次处理 {processed} 条，自动跳过已读取 {skipped} 条，结果保存至：{output_file}")
         return processed
 
     def _crawl_profile(self, page, finder: PublicEmailFinder, platform: str, url: str) -> ProfileResult:
@@ -271,6 +276,19 @@ class SocialProfileCrawler:
                 if email not in emails:
                     emails.append(email)
                 sources[email] = discovery.sources.get(email, "公开官网")
+        if (
+            platform == "youtube"
+            and self.youtube.reveal_gated_email
+            and not emails
+            and verification
+        ):
+            revealed_email = self.youtube._reveal_channel_email(page)
+            for email in [item.strip() for item in revealed_email.split("|") if item.strip()]:
+                if email not in emails:
+                    emails.append(email)
+                sources[email] = "YouTube 查看电子邮件地址"
+            if emails:
+                verification = False
         email_text = " | ".join(emails)
         status = classify_email_status(email_text, verification)
         source_text = " | ".join(dict.fromkeys(sources.values()))
@@ -419,6 +437,23 @@ class SocialProfileCrawler:
         }
         for name, value in values.items():
             sheet.cell(row, columns[name], value)
+
+    @staticmethod
+    def _row_already_processed(sheet, row: int, columns: dict[str, int]) -> bool:
+        return any(
+            sheet.cell(row, columns[name]).value not in (None, "")
+            for name in ("采集状态", "采集时间")
+        )
+
+    @staticmethod
+    def _save_workbook(workbook, output_file: Path) -> None:
+        try:
+            workbook.save(output_file)
+        except PermissionError as exc:
+            raise PermissionError(
+                f"无法写入结果文件：{output_file}\n"
+                "请先关闭 Excel/WPS 中打开的该文件，或在界面中选择新的输出文件名。"
+            ) from exc
 
     def _emit(self, message: str) -> None:
         self.logger.info(message)

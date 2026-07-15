@@ -1,6 +1,11 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import Mock
 
 from youtube_collector.crawler import (
+    BrowserCrawler,
+    _new_emails,
     classify_email_status,
     country_matches,
     parse_about_rows,
@@ -57,6 +62,26 @@ class CrawlerParserTests(unittest.TestCase):
         self.assertIn("另有需人工验证", classify_email_status("public@creator.test", True))
         self.assertIn("需人工验证", classify_email_status("", True))
         self.assertEqual(classify_email_status("", False), "未发现")
+
+    def test_persistent_profile_forces_visible_browser_during_login(self):
+        with TemporaryDirectory() as directory:
+            playwright = Mock()
+            context = Mock()
+            playwright.chromium.launch_persistent_context.return_value = context
+            crawler = BrowserCrawler(
+                Mock(), show_browser=False, profile_dir=Path(directory) / "profile"
+            )
+
+            self.assertIs(crawler._launch_context(playwright, force_headed=True), context)
+            options = playwright.chromium.launch_persistent_context.call_args.kwargs
+            self.assertEqual(options["user_data_dir"], str(Path(directory) / "profile"))
+            self.assertFalse(options["headless"])
+            self.assertEqual(options["channel"], "chrome")
+
+    def test_detects_email_revealed_after_button_click(self):
+        before = "更多信息\n查看电子邮件地址\nPublic: hello@example.com"
+        after = "更多信息\nPublic: hello@example.com\nBusiness: team@creator.test"
+        self.assertEqual(_new_emails(before, after), ["team@creator.test"])
 
 
 if __name__ == "__main__":

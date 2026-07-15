@@ -3,10 +3,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from youtube_collector.gui import application_root
+from youtube_collector.gui import App, application_root
 
 
 class GuiPathTests(unittest.TestCase):
+    def test_app_does_not_override_tkinter_options_helper(self):
+        self.assertNotIn("_options", App.__dict__)
+
     def test_source_mode_uses_project_root(self):
         self.assertEqual(application_root(), Path(__file__).resolve().parent.parent)
 

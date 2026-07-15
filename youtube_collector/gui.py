@@ -24,6 +24,7 @@ def application_root() -> Path:
 
 
 ROOT = application_root()
+BROWSER_PROFILE = ROOT / "browser_profile"
 
 
 def _logger() -> logging.Logger:
@@ -137,10 +138,16 @@ class App(tk.Tk):
         row += 1
 
         ttk.Label(frame, text="爬虫设置").grid(row=row, column=0, sticky="w", pady=7)
+        crawler_options = ttk.Frame(frame)
+        crawler_options.grid(row=row, column=1, columnspan=3, sticky="w")
         self.show_browser_check = ttk.Checkbutton(
-            frame, text="显示浏览器窗口（便于观察采集过程）", variable=self.show_browser
+            crawler_options, text="显示浏览器窗口（便于观察采集过程）", variable=self.show_browser
         )
-        self.show_browser_check.grid(row=row, column=1, columnspan=3, sticky="w")
+        self.show_browser_check.pack(side="left")
+        self.login_button = ttk.Button(
+            crawler_options, text="首次登录 / 更新登录状态", command=self._start_login
+        )
+        self.login_button.pack(side="left", padx=(16, 0))
         row += 1
 
         ttk.Label(frame, text="邮箱采集").grid(row=row, column=0, sticky="w", pady=7)
@@ -238,6 +245,10 @@ class App(tk.Tk):
             text="主页无邮箱时检查公开官网",
             variable=self.excel_scan_public_websites,
         ).pack(side="left", padx=(16, 0))
+        self.excel_login_button = ttk.Button(
+            browser_options, text="首次登录 / 更新登录状态", command=self._start_login
+        )
+        self.excel_login_button.pack(side="left", padx=(16, 0))
         ttk.Label(frame, text="Excel 输出").grid(row=5, column=0, sticky="w", padx=(0, 12), pady=7)
         ttk.Entry(frame, textvariable=self.excel_output).grid(
             row=5, column=1, columnspan=2, sticky="ew", pady=7
@@ -316,7 +327,7 @@ class App(tk.Tk):
             except (OSError, ValueError):
                 pass
 
-    def _options(self) -> CollectOptions:
+    def _collect_options(self) -> CollectOptions:
         keywords = [x.strip() for x in self.keywords.get().split("|") if x.strip()]
         if not keywords:
             raise ValueError("请至少填写一个搜索关键词。")
@@ -358,7 +369,7 @@ class App(tk.Tk):
 
     def _start(self) -> None:
         try:
-            options = self._options()
+            options = self._collect_options()
         except (ValueError, OSError) as exc:
             messagebox.showerror("参数有误", str(exc))
             return
@@ -379,6 +390,7 @@ class App(tk.Tk):
                         status,
                         show_browser=config["show_browser"],
                         timeout_seconds=config["request_timeout_seconds"],
+                        profile_dir=BROWSER_PROFILE,
                     )
                 else:
                     api = YouTubeApiClient(
@@ -422,6 +434,7 @@ class App(tk.Tk):
                     interval=0.2,
                     timeout_seconds=30,
                     scan_public_websites=scan_public_websites,
+                    profile_dir=BROWSER_PROFILE,
                 )
                 count = collector.crawl_excel(
                     input_file,
@@ -434,6 +447,31 @@ class App(tk.Tk):
             except Exception as exc:
                 _logger().exception("Excel 名单采集失败")
                 self.events.put(("excel_error", str(exc)))
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+
+    def _start_login(self) -> None:
+        if self.worker and self.worker.is_alive():
+            messagebox.showwarning("任务运行中", "请先等待当前任务结束，再打开登录窗口。")
+            return
+        self.start_button.configure(state="disabled")
+        self.excel_start_button.configure(state="disabled")
+        self.login_button.configure(state="disabled")
+        self.excel_login_button.configure(state="disabled")
+        self._append("正在打开首次登录窗口；登录完成后请关闭整个浏览器窗口。")
+        self._append("正在打开首次登录窗口；登录完成后请关闭整个浏览器窗口。", excel=True)
+
+        def work() -> None:
+            try:
+                status = lambda text: self.events.put(("log", text))
+                BrowserCrawler(
+                    _logger(), status, show_browser=True, profile_dir=BROWSER_PROFILE
+                ).manual_login()
+                self.events.put(("login_done", None))
+            except Exception as exc:
+                _logger().exception("首次登录失败")
+                self.events.put(("login_error", str(exc)))
 
         self.worker = threading.Thread(target=work, daemon=True)
         self.worker.start()
@@ -471,6 +509,14 @@ class App(tk.Tk):
                 elif kind == "excel_error":
                     self._finish()
                     messagebox.showerror("Excel 名单采集失败", str(value))
+                elif kind == "login_done":
+                    self._finish()
+                    self._append("登录窗口已关闭，登录状态已保存在本机。")
+                    self._append("登录窗口已关闭，登录状态已保存在本机。", excel=True)
+                    messagebox.showinfo("登录状态已保存", "现在可以开始浏览器采集。")
+                elif kind == "login_error":
+                    self._finish()
+                    messagebox.showerror("首次登录失败", str(value))
         except queue.Empty:
             pass
         self.after(100, self._drain_events)
@@ -487,6 +533,8 @@ class App(tk.Tk):
         self.stop_button.configure(state="disabled")
         self.excel_start_button.configure(state="normal")
         self.excel_stop_button.configure(state="disabled")
+        self.login_button.configure(state="normal")
+        self.excel_login_button.configure(state="normal")
 
 
 def run() -> None:

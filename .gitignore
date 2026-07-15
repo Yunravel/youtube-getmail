@@ -5,5 +5,7 @@ __pycache__/
 *.pyc
 .venv/
 .playwright-cli/
+browser_profile/
 build/
 *.spec
+backups/*.tar.gz
