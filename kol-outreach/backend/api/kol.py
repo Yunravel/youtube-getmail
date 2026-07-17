@@ -49,6 +49,15 @@ class KolOut(BaseModel):
     recent_videos: Optional[list] = None
     personal_intro: Optional[str] = None
     status: str = "pending"
+    # Tier 1 标准化新增列（2026-07，由 contact_notes 拆出）
+    avg_views_10d: Optional[int] = None
+    language: Optional[str] = None
+    email_status: Optional[str] = None
+    email_source: Optional[str] = None
+    collect_status: Optional[str] = None
+    collect_at: Optional[str] = None
+    source_link: Optional[str] = None
+    fit_project_code: Optional[str] = None
 
     class Config:
         from_attributes = True

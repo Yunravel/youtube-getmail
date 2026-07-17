@@ -35,7 +35,13 @@ def get_db():
 
 
 def init_db():
-    """初始化数据库 - 建表(开发用,生产用 alembic 迁移)"""
+    """初始化数据库 - 建表(开发用,生产用 alembic 迁移)。
+
+    历史背景：本项目长期用 ``create_all`` + 启动时 ``ALTER TABLE`` 维护 schema，
+    生产库靠 ``_ensure_*`` 函数补列。自引入 alembic（2026-07）后，生产 schema 变更
+    应走 ``alembic upgrade head``；此处仅保留给本地 SQLite 开发快速建表，避免回归。
+    新增列/表请写到 alembic migration，不要在这里继续堆 ``_ensure_*``。
+    """
     # 必须先 import 所有模型,确保它们注册到 Base.metadata
     import models  # noqa: F401  触发模型注册
     Base.metadata.create_all(bind=engine)

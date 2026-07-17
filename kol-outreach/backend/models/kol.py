@@ -55,5 +55,17 @@ class Kol(Base):
     # 状态:pending(待发) / sent(已发首封) / in_conversation(对话中)
     #       closed(结束) / blacklisted(无效)
     status = Column(String(50), default="pending", index=True)
+
+    # ===== Tier 1 标准化新增列（2026-07，由 contact_notes 拆出）=====
+    # 这些列的权威来源是导入脚本/新表；contact_notes 保留为只读历史快照。
+    avg_views_10d = Column(Integer, comment="10天平均浏览量；未知为 NULL，0 表示观测值确为 0")
+    language = Column(String(50), index=True, comment="BCP47 语言码，如 en")
+    email_status = Column(String(50), index=True, comment="采集邮箱状态原文，如 已获取/需人工验证/未发现")
+    email_source = Column(String(100), comment="邮箱来源，如 公开主页简介")
+    collect_status = Column(String(50), comment="采集状态，如 成功/需要登录验证")
+    collect_at = Column(DateTime, comment="采集时间 UTC")
+    source_link = Column(String(2048), comment="采集来源链接")
+    fit_project_code = Column(String(30), comment="最近一次评估的项目代码；权威在 project_assessment")
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
