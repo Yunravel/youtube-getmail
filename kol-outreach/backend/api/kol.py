@@ -4,6 +4,7 @@ KOL 接口 - 列表/详情/CSV批量导入
 """
 import csv
 import io
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query
@@ -241,3 +242,36 @@ def generate_intros(body: GenerateIntroIn, db: Session = Depends(get_db)):
 
     db.commit()
     return {"generated": generated, "skipped": skipped}
+
+
+@router.post("/import-candidate")
+async def import_candidate(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """导入 KOL-Find 多平台候选池 Excel → kol_candidate 大数据库 + 选入 kol/kol_email。
+
+    接受 .xlsx（含「全部候选」表，28 列）。处理：
+      1. 全量写入 kol_candidate（按 platform+account 去重）
+      2. 有联系邮箱的选入 kol 表（邮箱去重，已存在跳过）
+      3. 多邮箱拆分写入 kol_email
+    幂等：重复上传只插新行，不产生重复。
+
+    返回统计：candidate_inserted/skipped, kol_inserted/skipped, kol_email_inserted。
+    """
+    if not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(400, "只支持 .xlsx 文件")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "文件为空")
+
+    from scripts.import_kol_candidate import run_import
+
+    batch = f"upload-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    try:
+        stats = run_import(content, commit=True, batch=batch, db=db)
+    except ValueError as e:
+        # Excel 格式错误（缺表/缺列）
+        raise HTTPException(422, str(e))
+    return stats

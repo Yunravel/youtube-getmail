@@ -26,6 +26,15 @@ export const kolApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
   },
+  // 导入 KOL-Find 候选池 Excel → kol_candidate 大数据库 + 选入 kol/kol_email
+  importCandidate: (file) => {
+    const form = new FormData()
+    form.append('file', file)
+    return api.post('/kols/import-candidate', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000,  // 大文件 5103 行，给 2 分钟
+    })
+  },
   delete: (id) => api.delete(`/kols/${id}`),
   generateIntros: (kolIds, ourProduct = 'our product') =>
     api.post('/kols/generate-intros', { kol_ids: kolIds, our_product: ourProduct }),
@@ -39,6 +48,13 @@ export const threadApi = {
   updateStatus: (id, status) => api.post(`/threads/${id}/status`, { status }),
   addNote: (id, operatorId, content) =>
     api.post(`/threads/${id}/notes`, { operator_id: operatorId, content }),
+  // AI 画像回填（HotLead 看板）：thread_ids 为空则处理全部 hot
+  backfillProfile: (threadIds = null, force = false) =>
+    api.post('/threads/backfill-profile', { thread_ids: threadIds, force }),
+  backfillStatus: () => api.get('/threads/backfill-status'),
+  // 报价单导出：返回 xlsx blob，前端触发下载
+  exportQuotes: (threadIds, project = 'dola') =>
+    api.post('/threads/export', { thread_ids: threadIds, project }, { responseType: 'blob' }),
 }
 
 // ===== 邮箱 =====

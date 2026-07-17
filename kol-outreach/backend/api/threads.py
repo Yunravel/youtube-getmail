@@ -1,8 +1,10 @@
-"""会话接口 - Hot Lead 看板 / 分配 / 详情 / 关闭"""
+"""会话接口 - Hot Lead 看板 / 分配 / 详情 / 关闭 / 导出"""
+import uuid
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -10,6 +12,37 @@ from db import get_db
 from models import Thread, Message, Note, Operator
 
 router = APIRouter()
+
+
+# ===== AI 回填后台任务的内存状态（重启丢失可接受，任务幂等可重跑）=====
+# 同时只允许一个回填任务在跑，避免并发 DeepSeek 调用翻倍。
+_backfill_jobs: dict[str, dict] = {}
+
+
+def _run_backfill_job(job_id: str, thread_ids: Optional[list[int]], force: bool) -> None:
+    """后台任务函数：被 BackgroundTasks 调度，更新内存 job 状态。"""
+    from scripts.backfill_kol_profile import run_backfill
+
+    job = _backfill_jobs[job_id]
+    try:
+        def on_progress(done, total):
+            job["processed"] = done
+            job["total"] = total
+
+        result = run_backfill(
+            thread_ids=thread_ids,
+            commit=True,
+            force=force,
+            workers=4,
+            on_progress=on_progress,
+        )
+        job["status"] = "done"
+        job["result"] = result
+        job["finished_at"] = datetime.utcnow().isoformat()
+    except Exception as e:
+        job["status"] = "failed"
+        job["error"] = str(e)
+        job["finished_at"] = datetime.utcnow().isoformat()
 
 
 class ThreadOut(BaseModel):
@@ -95,6 +128,93 @@ def list_threads(
             updated_at=t.updated_at,
         ))
     return result
+
+
+# ===== AI 画像回填 + 报价导出（HotLead 看板扩展）=====
+# 注意：字面量路由必须定义在 /{thread_id} 之前，否则会被 {thread_id} 抢先匹配。
+
+
+class BackfillProfileIn(BaseModel):
+    thread_ids: Optional[list[int]] = None  # 空 → 处理全部 hot
+    force: bool = False                      # True 覆盖非空字段
+
+
+@router.post("/backfill-profile")
+def backfill_profile(
+    body: BackfillProfileIn,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """触发 AI 画像回填后台任务。
+
+    从每个 thread 最新一封回信正文里，AI 提取平台/账号/粉丝/画像/报价/合作条件，
+    回填到 kol 表与 message.ai_analysis（增量，默认只填空）。
+    立即返回 job_id，前端轮询 /backfill-status 看进度。
+    同时只允许一个回填任务在跑。
+    """
+    running = [j for j in _backfill_jobs.values() if j["status"] == "running"]
+    if running:
+        raise HTTPException(409, f"已有回填任务在跑: {running[0]['job_id']}")
+
+    thread_ids = body.thread_ids
+    if not thread_ids:
+        thread_ids = [t.id for t in db.query(Thread).filter(Thread.status == "hot").all()]
+    if not thread_ids:
+        return {"job_id": None, "total": 0, "message": "没有符合条件的会话"}
+
+    job_id = str(uuid.uuid4())[:8]
+    _backfill_jobs[job_id] = {
+        "job_id": job_id,
+        "status": "running",
+        "total": len(thread_ids),
+        "processed": 0,
+        "force": body.force,
+        "started_at": datetime.utcnow().isoformat(),
+    }
+    background_tasks.add_task(_run_backfill_job, job_id, thread_ids, body.force)
+    return {"job_id": job_id, "total": len(thread_ids)}
+
+
+@router.get("/backfill-status")
+def backfill_status():
+    """查最新回填任务进度。返回最近一个 job 的状态。"""
+    if not _backfill_jobs:
+        return {"job_id": None, "status": "idle"}
+    latest = list(_backfill_jobs.values())[-1]
+    return latest
+
+
+class ExportIn(BaseModel):
+    thread_ids: list[int]
+    project: str = "dola_uk"          # dola_uk / pippit_2026
+
+
+@router.post("/export")
+def export_threads(body: ExportIn, db: Session = Depends(get_db)):
+    """按规范导出勾选 thread 的报价单 Excel。"""
+    if not body.thread_ids:
+        raise HTTPException(422, "thread_ids 不能为空")
+    if len(body.thread_ids) > 200:
+        raise HTTPException(422, "单次最多导出 200 条")
+
+    from services.export_quote import build_quote_workbook
+
+    project_code = "pippit_2026" if "pippit" in body.project.lower() else "dola_uk"
+    xlsx_bytes = build_quote_workbook(db, body.thread_ids, project_code=project_code)
+
+    import io
+    from urllib.parse import quote
+    datestr = datetime.utcnow().strftime('%Y%m%d')
+    # Content-Disposition 头不支持非 ASCII；用 RFC 5987 的 filename* 给中文，
+    # 同时给个纯 ASCII 的 filename 兜底（部分老客户端只认 filename）。
+    cn_name = f"已报价KOL_{len(body.thread_ids)}位_{datestr}.xlsx"
+    ascii_name = f"quoted_kol_{len(body.thread_ids)}_{datestr}.xlsx"
+    disposition = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(cn_name)}"
+    return StreamingResponse(
+        io.BytesIO(xlsx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": disposition},
+    )
 
 
 @router.get("/{thread_id}")
