@@ -3,7 +3,7 @@
     <a-page-header
       class="thread-header"
       :title="thread.thread.kol_name || thread.thread.kol_email"
-      @back="$router.push('/hot-leads')"
+      @back="$router.push(backTarget)"
     >
       <template #subTitle>会话详情</template>
       <template #extra>
@@ -129,7 +129,13 @@
 
                 <div v-if="msg.ai_analysis" class="message-insight">
                   <RobotOutlined />
-                  <span><b>意向判断：</b>{{ msg.ai_analysis.summary || '已完成分析' }}</span>
+                  <div class="message-insight-content">
+                    <div><b>意向判断：</b>{{ msg.ai_analysis.summary || '已完成分析' }}</div>
+                    <div v-if="formatBudget(msg.ai_analysis.budget_mentioned)" class="message-quote">
+                      <TagsOutlined />
+                      <b>报价：</b>{{ formatBudget(msg.ai_analysis.budget_mentioned) }}
+                    </div>
+                  </div>
                 </div>
               </div>
             </article>
@@ -172,6 +178,11 @@
             <div class="summary-label"><RobotOutlined /> AI 摘要</div>
             <div>{{ thread.thread.ai_summary || '等待回信分析' }}</div>
           </div>
+
+          <div v-if="latestBudget" class="quote-block">
+            <div class="quote-label"><TagsOutlined /> 报价</div>
+            <div>{{ latestBudget }}</div>
+          </div>
         </a-card>
 
         <a-card class="side-card notes-card" title="内部备注" :bordered="false">
@@ -208,7 +219,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   CheckCircleOutlined,
@@ -227,6 +238,7 @@ import { useRoute } from 'vue-router'
 import { threadApi, operatorApi } from '../api'
 
 const route = useRoute()
+const backTarget = computed(() => route.query.from === 'mailbox' ? '/mailbox' : '/hot-leads')
 const threadId = Number(route.params.id)
 
 const thread = ref(null)
@@ -234,6 +246,18 @@ const operators = ref([])
 const assigneeId = ref(null)
 const noteBody = ref('')
 let refreshTimer = null
+
+const latestBudget = computed(() => {
+  const messages = thread.value?.messages || []
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const msg = messages[index]
+    if (msg.direction === 'inbound' && msg.ai_analysis) {
+      const budget = formatBudget(msg.ai_analysis.budget_mentioned)
+      if (budget) return budget
+    }
+  }
+  return ''
+})
 
 async function load() {
   thread.value = await threadApi.detail(threadId)
@@ -279,6 +303,19 @@ function formatBytes(value) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function formatBudget(value) {
+  if (value === null || value === undefined || value === '') return ''
+  if (typeof value === 'string' || typeof value === 'number') return String(value)
+  if (Array.isArray(value)) return value.map(formatBudget).filter(Boolean).join('；')
+  if (typeof value === 'object') {
+    const amount = value.amount ?? value.price
+    const currency = value.currency || ''
+    const detail = value.deliverable || value.description || ''
+    return [currency, amount, detail].filter((item) => item !== '').join(' ')
+  }
+  return String(value)
 }
 
 function intentColor(intent) {
@@ -530,6 +567,24 @@ onUnmounted(() => {
   border-top: 1px solid #edf2f7;
 }
 
+.message-insight-content {
+  min-width: 0;
+}
+
+.message-quote {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: 5px;
+  color: #b45309;
+  font-weight: 500;
+}
+
+.message-insight .message-quote :deep(svg) {
+  margin-top: 3px;
+  color: #d97706;
+}
+
 .attachment-list {
   display: flex;
   flex-direction: column;
@@ -597,6 +652,23 @@ onUnmounted(() => {
 .summary-label {
   margin-bottom: 5px;
   color: #2563eb;
+  font-weight: 600;
+}
+
+.quote-block {
+  padding: 12px;
+  margin-top: 10px;
+  color: #78350f;
+  font-size: 13px;
+  line-height: 1.65;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+}
+
+.quote-label {
+  margin-bottom: 5px;
+  color: #b45309;
   font-weight: 600;
 }
 

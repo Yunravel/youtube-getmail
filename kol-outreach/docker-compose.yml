@@ -16,7 +16,10 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_SNOV_INBOX_URL: ${VITE_SNOV_INBOX_URL:-}
     container_name: kol-frontend
     ports:
       - "80:80"

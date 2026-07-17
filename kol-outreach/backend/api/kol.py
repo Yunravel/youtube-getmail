@@ -22,6 +22,27 @@ class KolOut(BaseModel):
     name: str
     channel_url: Optional[str] = None
     email: Optional[str] = None
+    snov_prospect_id: Optional[str] = None
+    full_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    locality: Optional[str] = None
+    position: Optional[str] = None
+    company_name: Optional[str] = None
+    company_site: Optional[str] = None
+    phones: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    platform: Optional[str] = None
+    social_handle: Optional[str] = None
+    profile_url: Optional[str] = None
+    followers: int = 0
+    priority: Optional[str] = None
+    content_category: Optional[str] = None
+    source: Optional[str] = None
+    contact_notes: Optional[str] = None
+    snov_list_id: Optional[str] = None
+    snov_list_name: Optional[str] = None
+    snov_list_ids: Optional[list] = None
     subscribers: int = 0
     country: Optional[str] = None
     niche: Optional[str] = None
@@ -88,15 +109,25 @@ async def import_csv(
 
     for row in reader:
         email = (row.get("email") or "").strip()
-        name = (row.get("name") or "").strip()
+        name = (row.get("name") or row.get("fullName") or "").strip()
+        if not name:
+            name = " ".join(
+                value for value in (
+                    (row.get("firstName") or "").strip(),
+                    (row.get("lastName") or "").strip(),
+                ) if value
+            )
 
         # 必填校验
         if not email or not name:
             skipped += 1
             continue
 
-        # 去重(按 email)
-        exists = db.query(Kol).filter(Kol.email == email).first()
+        email = email.lower()
+
+        # 去重(按不区分大小写的 email)
+        from sqlalchemy import func
+        exists = db.query(Kol).filter(func.lower(Kol.email) == email).first()
         if exists:
             skipped += 1
             continue
@@ -106,7 +137,8 @@ async def import_csv(
         recent_videos = [v.strip() for v in videos_str.split("|") if v.strip()] if videos_str else None
 
         try:
-            subscribers = int((row.get("subscribers") or "0").replace(",", ""))
+            followers_text = row.get("customFields[followers]") or row.get("subscribers") or "0"
+            subscribers = int(followers_text.replace(",", ""))
         except (TypeError, ValueError):
             skipped += 1
             continue
@@ -120,6 +152,24 @@ async def import_csv(
             country=row.get("country", "").strip() or None,
             niche=row.get("niche", "").strip() or None,
             recent_videos=recent_videos,
+            full_name=name,
+            first_name=(row.get("firstName") or "").strip() or None,
+            last_name=(row.get("lastName") or "").strip() or None,
+            locality=(row.get("locality") or "").strip() or None,
+            position=(row.get("position") or "").strip() or None,
+            company_name=(row.get("companyName") or "").strip() or None,
+            company_site=(row.get("companySite") or "").strip() or None,
+            phones=(row.get("phones") or "").strip() or None,
+            linkedin_url=(row.get("socialLinks[linkedIn]") or "").strip() or None,
+            platform=(row.get("customFields[platform]") or "").strip() or None,
+            social_handle=(row.get("customFields[socialHandle]") or "").strip() or None,
+            profile_url=(row.get("customFields[profileUrl]") or row.get("channel_url") or "").strip() or None,
+            followers=subscribers,
+            priority=(row.get("customFields[priority]") or "").strip().upper() or None,
+            content_category=(row.get("customFields[contentCategory]") or row.get("niche") or "").strip() or None,
+            source=(row.get("customFields[source]") or "").strip() or None,
+            contact_notes=(row.get("customFields[notes]") or "").strip() or None,
+            snov_list_id=(row.get("listId") or "").strip() or None,
             status="pending",
         )
         db.add(kol)

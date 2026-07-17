@@ -19,7 +19,10 @@ _client: Optional[OpenAI] = None
 def _get_client() -> Optional[OpenAI]:
     global _client
     if _client is None and settings.OPENAI_API_KEY:
-        _client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        client_options = {"api_key": settings.OPENAI_API_KEY}
+        if settings.OPENAI_BASE_URL:
+            client_options["base_url"] = settings.OPENAI_BASE_URL
+        _client = OpenAI(**client_options)
     return _client
 
 
@@ -97,19 +100,27 @@ def analyze_intent(
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
+            max_tokens=800,
+            extra_body=(
+                {"thinking": {"type": "disabled"}}
+                if settings.OPENAI_BASE_URL and "api.deepseek.com" in settings.OPENAI_BASE_URL
+                else {}
+            ),
             temperature=0.1,   # 分析任务要确定性,低温度
-            max_tokens=400,
             response_format={"type": "json_object"},  # 强制 JSON 输出
         )
         result = json.loads(resp.choices[0].message.content)
 
         # 字段校验 + 默认值
         result.setdefault("intent", "low")
+        result.setdefault("intent", "low")
         result.setdefault("intent_score", 0)
         result.setdefault("budget_mentioned", None)
         result.setdefault("key_questions", [])
         result.setdefault("timeline", "none")
         result.setdefault("summary", "")
+        result["analysis_source"] = "model"
+        result["analysis_model"] = settings.OPENAI_MODEL_INTENT
         result.setdefault("suggested_action", "暂不跟进")
 
         logger.info(f"意向分析: intent={result['intent']} score={result['intent_score']}")
@@ -158,6 +169,8 @@ def _result(intent, score, summary, action, **extra):
     r = {
         "intent": intent,
         "intent_score": score,
+        "analysis_source": "rules",
+        "analysis_model": None,
         "budget_mentioned": None,
         "key_questions": [],
         "timeline": "none",

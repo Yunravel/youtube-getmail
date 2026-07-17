@@ -4,9 +4,10 @@
 
 ## ✨ 核心功能
 
-- **Snov 邮件同步**:接收 webhook，并每 2 分钟调用 Snov API 补拉回信；保存邮件正文、联系人邮箱、Campaign 任务名和可用的附件元数据
+- **Snov 邮件同步**:接收普通回信与自动回复 webhook，并每 2 分钟调用 Snov API 补拉普通回信；保存邮件正文、联系人邮箱、Campaign 任务名和可用的附件元数据
 - **AI 意向分析**:KOL 回信自动分级(Hot/Medium/Low/Negative),运营只看高意向
 - **运营 Web 中台**:Hot Lead 看板 / 邮箱与会话详情 / 分配 / 内部备注
+- **邮箱收件管理**:会话搜索、Campaign/收发账户筛选、已读、星标、附件提示和分页；每 2 分钟刷新
 - **人工跟进**:中台不代发邮件；运营在 Snov 中人工回复
 
 ## 🏗️ 架构
@@ -89,6 +90,17 @@ copy .env.example .env
 python -m uvicorn main:app --reload --port 8000
 ```
 
+### 清洗导入与公开资料补全
+
+清洗 Excel 并预检（不写数据库）：
+
+```powershell
+python -m scripts.import_kol_xlsx "源文件.xlsx" --output "清洗结果.xlsx"
+```
+
+确认摘要后增加 `--commit` 执行导入。导入按小写邮箱去重：新邮箱创建 KOL，已有邮箱只补充空字段，不覆盖人工维护的状态和资料。
+
+
 访问 http://localhost:8000/docs 看 API 文档
 
 ### 2. 前端
@@ -96,6 +108,7 @@ python -m uvicorn main:app --reload --port 8000
 ```bash
 cd frontend
 npm install
+# 可选：复制 .env.example 为 .env，配置点击“新邮件”后跳转的 Snov 地址
 npm run dev
 ```
 
@@ -120,7 +133,10 @@ curl -X POST "http://localhost:8000/api/webhook/snov?token=你的SNOV_WEBHOOK_TO
 
 ## 📊 CSV 导入格式(爬虫对接)
 
-爬虫产出 CSV,列定义:
+导入接口兼容原爬虫字段与 Snov 联系人模板字段。两种格式都以 `email`
+作为唯一联系人键，重复执行不会新增重复联系人。
+
+原爬虫 CSV 列定义:
 
 | 列名 | 必填 | 说明 |
 |------|------|------|
@@ -139,11 +155,23 @@ name,email,channel_url,subscribers,country,niche,recent_videos
 MrBeast,contact@mrbeast.com,https://youtube.com/@MrBeast,320000000,US,entertainment,I Built a City|50 Hours In Solitary
 ```
 
+Snov 模板字段包括 `fullName`、`firstName`、`lastName`、`locality`、
+`position`、`companyName`、`companySite`、`phones`、
+`socialLinks[linkedIn]`、`customFields[...]` 与 `listId`。其中 `email`
+必填，一行只填写一个有效邮箱。
+
+从已配置的 Snov 账号同步全部现有联系人：
+
+```bash
+cd backend
+python -m scripts.sync_snov_contacts
+```
+
 ## 🗄️ 数据库表
 
 | 表 | 说明 |
 |----|------|
-| kol | KOL 主表(爬虫产出) |
+| kol | KOL/联系人主表（兼容爬虫字段与 Snov 联系人模板字段） |
 | thread | 邮件会话(一个KOL一个,聚合往来邮件) |
 | message | 邮件消息(每封收/发记录,含 AI 分析 JSON) |
 | operator | 运营人员 |
@@ -156,8 +184,13 @@ MrBeast,contact@mrbeast.com,https://youtube.com/@MrBeast,320000000,US,entertainm
 |------|------|------|
 | POST | /api/kols/import-csv | 批量导入 KOL |
 | GET | /api/kols | KOL 列表(分页+筛选) |
+| POST | /api/snov/sync-contacts | 从 Snov 全部有效名单同步联系人 |
 | GET | /api/threads | 会话看板(按意向分排序) |
 | GET | /api/threads/{id} | 会话详情(邮件+AI+备注) |
+| GET | /api/mailbox | 邮箱会话列表、搜索、筛选、分页与文件夹计数 |
+| GET | /api/mailbox/filters | 邮箱 Campaign 和收发账户筛选项 |
+| PATCH | /api/mailbox/threads/{id} | 更新单个会话已读/星标状态 |
+| PATCH | /api/mailbox/threads | 批量更新会话已读/星标状态 |
 | POST | /api/threads/{id}/assign | 分配运营 |
 | POST | /api/webhook/snov | 接 Snov 已发/回信(回信自动 AI 分析) |
 | GET | /api/stats/overview | 总览统计 |
@@ -187,6 +220,21 @@ MrBeast,contact@mrbeast.com,https://youtube.com/@MrBeast,320000000,US,entertainm
 - negative → closed(自动关单)
 
 > 没配 OPENAI_API_KEY 时走关键词规则兜底,配了自动切 GPT。
+
+DeepSeek Flash 使用 OpenAI 兼容接口：
+
+```env
+OPENAI_API_KEY=你的DeepSeekKey
+OPENAI_BASE_URL=https://api.deepseek.com
+OPENAI_MODEL_INTENT=deepseek-v4-flash
+OPENAI_MODEL_PERSONALIZE=deepseek-v4-flash
+```
+
+配置模型后，可以在 `backend` 目录重新分析历史规则结果：
+
+```bash
+python -m scripts.reanalyze_messages --workers 4
+```
 
 ### Snov 两分钟同步与附件限制
 

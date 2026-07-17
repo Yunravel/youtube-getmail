@@ -19,7 +19,10 @@ _client: Optional[OpenAI] = None
 def _get_client() -> Optional[OpenAI]:
     global _client
     if _client is None and settings.OPENAI_API_KEY:
-        _client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        client_options = {"api_key": settings.OPENAI_API_KEY}
+        if settings.OPENAI_BASE_URL:
+            client_options["base_url"] = settings.OPENAI_BASE_URL
+        _client = OpenAI(**client_options)
     return _client
 
 

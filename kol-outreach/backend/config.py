@@ -3,11 +3,15 @@ KOL 外联中台 - 配置模块
 所有配置从环境变量读取,生产环境用 .env 文件覆盖默认值
 """
 import os
+from pathlib import Path
 from typing import Optional
 
 try:
     # python-dotenv 可选,开发时用 .env 文件
     from dotenv import load_dotenv
+    # Local development commonly keeps production-like settings at the
+    # repository root. Load it first so backend/.env only fills missing keys.
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env.prod")
     load_dotenv()
 except ImportError:
     pass
@@ -42,6 +46,8 @@ class Settings:
 
     # ===== OpenAI =====
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
+    # OpenAI-compatible providers (for example DeepSeek) can override the API root.
+    OPENAI_BASE_URL: Optional[str] = os.getenv("OPENAI_BASE_URL") or None
     # 意向分析用 mini 省钱,开场白用 4o 质量高
     OPENAI_MODEL_INTENT: str = os.getenv("OPENAI_MODEL_INTENT", "gpt-4o-mini")
     OPENAI_MODEL_PERSONALIZE: str = os.getenv("OPENAI_MODEL_PERSONALIZE", "gpt-4o")

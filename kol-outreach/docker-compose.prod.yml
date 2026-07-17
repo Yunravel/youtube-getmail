@@ -40,6 +40,9 @@ services:
       - HOST=0.0.0.0
       - PORT=8000
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - OPENAI_MODEL_INTENT=${OPENAI_MODEL_INTENT:-gpt-4o-mini}
+      - OPENAI_MODEL_PERSONALIZE=${OPENAI_MODEL_PERSONALIZE:-gpt-4o}
       - SNOV_WEBHOOK_TOKEN=${SNOV_WEBHOOK_TOKEN:?Set SNOV_WEBHOOK_TOKEN in .env.prod}
       - SNOV_CLIENT_ID=${SNOV_CLIENT_ID:-}
       - SNOV_CLIENT_SECRET=${SNOV_CLIENT_SECRET:-}
@@ -51,7 +54,10 @@ services:
 
   # ===== 运营看板 + API 反代 =====
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_SNOV_INBOX_URL: ${VITE_SNOV_INBOX_URL:-}
     container_name: kol-frontend
     restart: unless-stopped
     depends_on:

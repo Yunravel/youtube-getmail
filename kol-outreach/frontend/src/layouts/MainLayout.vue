@@ -1,6 +1,11 @@
 <template>
   <a-layout style="min-height: 100vh">
-    <a-layout-sider v-model:collapsed="collapsed" collapsible>
+    <a-layout-sider
+      v-model:collapsed="collapsed"
+      collapsible
+      breakpoint="lg"
+      :collapsed-width="64"
+    >
       <div class="logo">
         <span v-if="!collapsed">外联回信中台</span>
         <span v-else>K</span>
@@ -18,6 +23,10 @@
         <a-menu-item key="/hot-leads">
           <fire-outlined />
           <span>Hot Lead</span>
+        </a-menu-item>
+        <a-menu-item key="/mailbox">
+          <mail-outlined />
+          <span>邮箱</span>
         </a-menu-item>
         <a-menu-item key="/kols">
           <team-outlined />
@@ -38,8 +47,8 @@
       <a-layout-header style="background: #fff; padding: 0 24px">
         <h3 style="margin: 0">{{ currentTitle }}</h3>
       </a-layout-header>
-      <a-layout-content style="margin: 16px">
-        <div :style="{ background: '#fff', padding: '24px', minHeight: '360px', borderRadius: '8px' }">
+      <a-layout-content class="main-content">
+        <div class="page-shell" :class="{ 'page-shell-full': route.meta.fullBleed }">
           <router-view />
         </div>
       </a-layout-content>
@@ -53,6 +62,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   DashboardOutlined,
   FireOutlined,
+  MailOutlined,
   TeamOutlined,
   UploadOutlined,
   BarChartOutlined,
@@ -65,11 +75,11 @@ const selectedKeys = ref([route.path])
 
 const currentTitle = computed(() => route.meta.title || 'KOL 外联中台')
 
-watch(() => route.path, (p) => {
-  // 子路由(threads/:id)时高亮 Hot Lead
-  if (p.startsWith('/threads')) selectedKeys.value = ['/hot-leads']
+watch(() => [route.path, route.query.from], ([p, from]) => {
+  // 从邮箱进入会话详情时继续高亮邮箱入口。
+  if (p.startsWith('/threads')) selectedKeys.value = [from === 'mailbox' ? '/mailbox' : '/hot-leads']
   else selectedKeys.value = [p]
-})
+}, { immediate: true })
 
 function onMenuClick({ key }) {
   router.push(key)
@@ -88,5 +98,32 @@ function onMenuClick({ key }) {
   background: rgba(255, 255, 255, 0.1);
   margin: 8px;
   border-radius: 6px;
+}
+
+.main-content {
+  margin: 16px;
+}
+
+.page-shell {
+  min-height: 360px;
+  padding: 24px;
+  overflow: hidden;
+  background: #fff;
+  border-radius: 8px;
+}
+
+.page-shell-full {
+  min-height: calc(100vh - 96px);
+  padding: 0;
+}
+
+@media (max-width: 768px) {
+  .main-content {
+    margin: 8px;
+  }
+
+  .page-shell:not(.page-shell-full) {
+    padding: 16px;
+  }
 }
 </style>

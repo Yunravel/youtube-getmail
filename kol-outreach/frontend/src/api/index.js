@@ -41,6 +41,15 @@ export const threadApi = {
     api.post(`/threads/${id}/notes`, { operator_id: operatorId, content }),
 }
 
+// ===== 邮箱 =====
+export const mailboxApi = {
+  list: (params) => api.get('/mailbox', { params }),
+  filters: () => api.get('/mailbox/filters'),
+  updateThread: (id, state) => api.patch(`/mailbox/threads/${id}`, state),
+  updateThreads: (threadIds, state) =>
+    api.patch('/mailbox/threads', { thread_ids: threadIds, ...state }),
+}
+
 // ===== 运营人员 =====
 export const operatorApi = {
   list: () => api.get('/operators'),

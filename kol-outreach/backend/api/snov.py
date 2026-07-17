@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, model_validator
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -15,6 +15,7 @@ from services.ai_intent import analyze_intent, intent_to_thread_status
 from services.attachments import extract_attachments
 from services.email_content import clean_email_body, is_html_email_body
 from services.snov_client import get_snov_client
+from services.snov_contacts import sync_snov_contacts
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -66,15 +67,34 @@ def list_webhooks():
         raise HTTPException(502, f"获取 Snov webhook 失败: {exc}")
 
 
+@router.post("/sync-contacts")
+def sync_contacts(db: Session = Depends(get_db)):
+    """Import every current Snov prospect list into the local contact table."""
+    try:
+        return sync_snov_contacts(db, get_snov_client())
+    except Exception as exc:
+        raise HTTPException(502, f"同步 Snov 联系人失败: {exc}")
+
+
 class CreateWebhookIn(BaseModel):
     endpoint_url: HttpUrl
     event_object: Literal["campaign_email", "campaign_reply"]
-    event_action: Literal["sent", "received"]
+    event_action: Literal["sent", "received", "autoreply_received"]
+
+    @model_validator(mode="after")
+    def validate_event_pair(self):
+        allowed_actions = {
+            "campaign_email": {"sent"},
+            "campaign_reply": {"received", "autoreply_received"},
+        }
+        if self.event_action not in allowed_actions[self.event_object]:
+            raise ValueError("event_action is not valid for event_object")
+        return self
 
 
 @router.post("/webhooks")
 def create_webhook(body: CreateWebhookIn):
-    """创建 Snov webhook；只开放中台需要的已发/回信事件。"""
+    """创建 Snov webhook；开放已发、普通回信和自动回复事件。"""
     try:
         existing = get_snov_client().list_webhooks()
         endpoint = str(body.endpoint_url)

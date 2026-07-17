@@ -2,6 +2,8 @@
 # Node 18 满足 Vite 5 的运行要求，并兼容 NAS 预置镜像。
 FROM node:18-alpine AS build
 WORKDIR /app
+ARG VITE_SNOV_INBOX_URL=""
+ENV VITE_SNOV_INBOX_URL=${VITE_SNOV_INBOX_URL}
 COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .

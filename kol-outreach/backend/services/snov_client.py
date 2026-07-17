@@ -102,6 +102,34 @@ class SnovClient:
             return payload
         return payload.get("data", []) if isinstance(payload, dict) else []
 
+    def list_prospect_lists(self) -> list[dict]:
+        """Return every prospect list in the connected Snov account."""
+        token = self._get_token()
+        response = self._client.get(
+            "/v1/get-user-lists", params={"access_token": token}
+        )
+        response.raise_for_status()
+        payload: Any = response.json()
+        return payload if isinstance(payload, list) else payload.get("data", [])
+
+    def get_prospects_in_list(
+        self, list_id: str, page: int = 1, per_page: int = 5000
+    ) -> dict:
+        """Read one page of contacts from a Snov prospect list (max 5,000)."""
+        token = self._get_token()
+        response = self._client.post(
+            "/v1/prospect-list",
+            params={
+                "access_token": token,
+                "listId": str(list_id),
+                "page": page,
+                "perPage": min(max(per_page, 1), 5000),
+            },
+        )
+        response.raise_for_status()
+        payload: Any = response.json()
+        return payload if isinstance(payload, dict) else {"prospects": []}
+
     def get_campaign_replies(self, campaign_id: str) -> dict | list:
         """Read email replies only, excluding LinkedIn replies."""
         # Despite the current knowledge-base spelling (`campaign_id`), the

@@ -5,6 +5,7 @@ os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["OPENAI_API_KEY"] = ""
 
 from api import snov as snov_api
+from api.webhook import _event_kind
 from db import SessionLocal, init_db
 from models import Message, Thread
 from services.attachments import normalize_attachments
@@ -38,6 +39,17 @@ class FakeSnovClient:
                 ],
             }
         ]
+
+    def list_webhooks(self):
+        return []
+
+    def create_webhook(self, event_object, event_action, endpoint_url):
+        return {
+            "event_object": event_object,
+            "event_action": event_action,
+            "endpoint_url": endpoint_url,
+            "status": "active",
+        }
 
 
 class SnovSyncTest(unittest.TestCase):
@@ -74,6 +86,20 @@ class SnovSyncTest(unittest.TestCase):
             {"filename": "bad.html", "url": "javascript:alert(1)"}
         )[0]
         self.assertIsNone(attachment["url"])
+
+    def test_autoreply_webhook_can_be_created_and_received(self):
+        body = snov_api.CreateWebhookIn(
+            endpoint_url="https://kol.example.com/api/webhook/snov?token=test-token",
+            event_object="campaign_reply",
+            event_action="autoreply_received",
+        )
+        result = snov_api.create_webhook(body)
+        self.assertEqual(result["status"], "created")
+        self.assertEqual(result["webhook"]["event_action"], "autoreply_received")
+        self.assertEqual(_event_kind({
+            "event_object": "campaign_reply",
+            "event_action": "autoreply_received",
+        }), "inbound")
 
 
 if __name__ == "__main__":

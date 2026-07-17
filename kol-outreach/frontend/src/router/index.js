@@ -20,6 +20,12 @@ const routes = [
         meta: { title: 'Hot Lead 看板' },
       },
       {
+        path: 'mailbox',
+        name: 'Mailbox',
+        component: () => import('../views/Mailbox.vue'),
+        meta: { title: '邮箱', fullBleed: true },
+      },
+      {
         path: 'threads/:id',
         name: 'ThreadDetail',
         component: () => import('../views/ThreadDetail.vue'),
