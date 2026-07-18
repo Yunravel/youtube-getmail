@@ -80,6 +80,35 @@ export const statsApi = {
 // ===== Snov 营销活动 =====
 export const snovApi = {
   campaigns: () => api.get('/snov/campaigns'),
+  createProspectListFromKols: (listName, kolIds) =>
+    api.post('/snov/prospect-lists/from-kols', {
+      list_name: listName,
+      kol_ids: kolIds,
+    }, { timeout: 120000 }),
+}
+
+// ===== 采集器（KOL 爬虫）=====
+// 触发后台采集任务 + 轮询进度，复刻 threadApi 的回填任务模式
+// 采集端点要求 X-Crawler-Token 头（与后端 CRAWLER_TOKEN 一致），构建期注入。
+const CRAWLER_TOKEN_HEADERS = (() => {
+  const token = import.meta.env.VITE_CRAWLER_TOKEN
+  return token ? { 'X-Crawler-Token': token } : {}
+})()
+
+export const crawlerApi = {
+  // 可选产品列表 + 关键词数（渲染复选框）
+  products: () => api.get('/crawler/products', { headers: CRAWLER_TOKEN_HEADERS }),
+  // 触发采集（后台任务），立即返回 job_id
+  // products 和 customQueries 至少有一个非空
+  start: (products, {
+    enableEnrich = true, enableEmail = true, enableDeepEmail = false, customQueries = [],
+  } = {}) =>
+    api.post('/crawler',
+      { products, enable_enrich: enableEnrich, enable_email: enableEmail,
+        enable_deep_email: enableDeepEmail, custom_queries: customQueries },
+      { headers: CRAWLER_TOKEN_HEADERS }),
+  // 查询最新采集任务进度（前端定时轮询）
+  status: () => api.get('/crawler/status', { headers: CRAWLER_TOKEN_HEADERS }),
 }
 
 export default api

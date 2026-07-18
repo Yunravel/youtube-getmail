@@ -14,18 +14,23 @@ from __future__ import annotations
 
 import argparse
 import io
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Union
 
 from openpyxl import load_workbook
-from sqlalchemy import func
 
 from db import SessionLocal
 from models import Kol, KolCandidate, KolEmail
-
-EMAIL_RE = re.compile(r"[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+# 解析工具抽取到共享模块，避免与 import_kol_candidate.py / 采集器三处分叉。
+from scripts._parse_utils import (
+    _trunc,
+    as_text,
+    parse_datetime,
+    parse_emails,
+    parse_int,
+    platform_normalize,
+)
 
 # ===== 三份文件的格式预设 =====
 # 每份定义：sheet 名 + 画像列（拼进 remark）+ 主要推荐产品列名
@@ -49,70 +54,6 @@ PRESETS: dict[str, dict] = {
 
 # 适配产品的 ✓/✅ 类符号（非空非"否"即视为适配）
 FIT_TRUE_MARKS = {"✓", "✅", "√", "是", "true", "yes", "1", "y"}
-
-
-def as_text(v: Any) -> str:
-    if v is None:
-        return ""
-    if isinstance(v, datetime):
-        return v.isoformat()
-    return str(v).strip()
-
-
-def _trunc(v: str | None, max_len: int) -> str | None:
-    """截断字符串到 max_len，避免超 varchar 宽度。None 透传。"""
-    if v is None:
-        return None
-    return v[:max_len] if len(v) > max_len else v
-
-
-def parse_int(v: Any) -> int | None:
-    """解析粉丝数/浏览量。支持纯数字；K/M 后缀兜底。"""
-    if v is None or v == "":
-        return None
-    if isinstance(v, (int, float)):
-        return max(0, int(v))
-    s = str(v).lower().replace(",", "").replace(" ", "").strip()
-    mult = 1
-    if s.endswith("k"):
-        s, mult = s[:-1], 1_000
-    elif s.endswith("m"):
-        s, mult = s[:-1], 1_000_000
-    try:
-        return max(0, int(float(s) * mult))
-    except ValueError:
-        return None
-
-
-def parse_emails(raw: Any) -> list[str]:
-    """拆分多邮箱（| , ; 分隔），小写去重保序。"""
-    text = as_text(raw).replace("|", " ").replace(",", " ").replace(";", " ")
-    seen: list[str] = []
-    for m in EMAIL_RE.findall(text):
-        e = m.strip(".,;:()[]<>\"'").lower()
-        if "@" in e and e not in seen:
-            seen.append(e)
-    return seen
-
-
-def parse_datetime(v: Any):
-    if v is None or v == "":
-        return None
-    if isinstance(v, datetime):
-        return v
-    s = as_text(v)
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            continue
-    return None
-
-
-def platform_normalize(raw: str) -> str:
-    low = raw.lower().strip()
-    return {"youtube": "YouTube", "instagram": "Instagram",
-            "tiktok": "TikTok", "x": "X", "twitter": "X", "twitter/x": "X"}.get(low, raw.strip())
 
 
 def build_fit_product(row: dict[str, Any], headers: list[str], preset: dict) -> str | None:
@@ -190,16 +131,23 @@ def map_row_to_candidate(row: dict[str, Any], headers: list[str], preset: dict, 
     }
 
 
-def detect_preset(sheet_names: list[str], headers: list[str]) -> str:
-    """按 sheet 名/列名自动识别格式。"""
-    hset = set(headers)
-    if "Dola核心场景" in hset or "达人画像" in hset:
-        return "dola"
-    if "达人类别" in hset or "社会身份/头衔备注" in hset:
-        return "pippit"
-    if "适配Dreamina" in hset or "适配产品" in hset:
-        return "richup"
-    raise ValueError(f"无法识别格式。sheet={sheet_names}, 列={headers[:8]}...")
+def detect_preset(wb) -> str:
+    """按 sheet 名/列名自动识别格式。遍历所有 sheet 找特征列
+    （Richup 第一个 sheet 是「需求总结」，数据在「KOL List」）。
+    """
+    for sn in wb.sheetnames:
+        ws = wb[sn]
+        try:
+            headers = {str(c.value or "") for c in next(ws.iter_rows(min_row=1, max_row=1))}
+        except StopIteration:
+            continue
+        if "Dola核心场景" in headers or "达人画像" in headers:
+            return "dola"
+        if "达人类别" in headers or "社会身份/头衔备注" in headers:
+            return "pippit"
+        if "适配Dreamina" in headers or "适配产品" in headers:
+            return "richup"
+    raise ValueError(f"无法识别格式。sheets={wb.sheetnames}。期望 Richup/Pippit/Dola 之一。")
 
 
 def load_rows(xlsx_source: Union[Path, bytes, io.BytesIO], preset_name: str | None) -> tuple[list[dict], list[str], dict]:
@@ -208,7 +156,7 @@ def load_rows(xlsx_source: Union[Path, bytes, io.BytesIO], preset_name: str | No
         xlsx_source = io.BytesIO(xlsx_source)
     wb = load_workbook(xlsx_source, read_only=True, data_only=True)
 
-    preset_name = preset_name or detect_preset(wb.sheetnames, [])
+    preset_name = preset_name or detect_preset(wb)
     if preset_name not in PRESETS:
         raise ValueError(f"未知 preset: {preset_name}，可选: {list(PRESETS.keys())}")
     preset = PRESETS[preset_name]

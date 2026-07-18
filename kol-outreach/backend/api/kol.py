@@ -275,3 +275,34 @@ async def import_candidate(
         # Excel 格式错误（缺表/缺列）
         raise HTTPException(422, str(e))
     return stats
+
+
+@router.post("/import-email-collection")
+async def import_email_collection(
+    file: UploadFile = File(...),
+    preset: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """导入"邮箱采集结果"格式 Excel（Richup/Pippit/Dola 三种）→ 大数据库 + 选入 kol。
+
+    与 /import-candidate 的区别：这个接口处理 22-23 列的邮箱采集结果格式，
+    /import-candidate 处理 28 列的 KOL-Find 候选池格式。
+
+    preset 不传则按 sheet 名/列名自动识别（richup/pippit/dola）。
+    含增量补全：已存在的 KOL 会被补全粉丝数/平台等空字段。
+    """
+    if not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(400, "只支持 .xlsx 文件")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "文件为空")
+
+    from scripts.import_email_collection import run_import as run_email_import
+
+    batch = f"upload-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    try:
+        stats = run_email_import(content, preset, commit=True, batch=batch, db=db)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return stats

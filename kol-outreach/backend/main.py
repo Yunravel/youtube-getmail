@@ -14,6 +14,7 @@ from config import settings
 from db import init_db
 from api import api_router
 from services.snov_scheduler import start_snov_scheduler, stop_snov_scheduler
+from services.crawler_scheduler import start_crawler_scheduler, stop_crawler_scheduler
 
 # 日志
 logging.basicConfig(
@@ -49,8 +50,10 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("✅ 数据库表已就绪")
     start_snov_scheduler()
+    start_crawler_scheduler()
     yield
     stop_snov_scheduler()
+    stop_crawler_scheduler()
     logger.info("👋 关闭中")
 
 

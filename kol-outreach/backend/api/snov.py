@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, HttpUrl, model_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from services.attachments import extract_attachments
 from services.email_content import clean_email_body, is_html_email_body
 from services.snov_client import get_snov_client
 from services.snov_contacts import sync_snov_contacts
+from services.snov_export import SnovListCreateError, create_snov_list_from_kols
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -74,6 +75,36 @@ def sync_contacts(db: Session = Depends(get_db)):
         return sync_snov_contacts(db, get_snov_client())
     except Exception as exc:
         raise HTTPException(502, f"同步 Snov 联系人失败: {exc}")
+
+
+class CreateProspectListFromKolsIn(BaseModel):
+    list_name: str = Field(min_length=1, max_length=200)
+    kol_ids: list[int] = Field(min_length=1, max_length=500)
+
+    @field_validator("list_name")
+    @classmethod
+    def normalize_list_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("名单名称不能为空")
+        return value
+
+
+@router.post("/prospect-lists/from-kols")
+def create_prospect_list_from_kols(
+    body: CreateProspectListFromKolsIn,
+    db: Session = Depends(get_db),
+):
+    """Create a fresh Snov list and fill it with selected pending KOLs."""
+    try:
+        return create_snov_list_from_kols(
+            db,
+            get_snov_client(),
+            list_name=body.list_name,
+            kol_ids=body.kol_ids,
+        )
+    except SnovListCreateError as exc:
+        raise HTTPException(502, f"创建 Snov 待发送名单失败: {exc}")
 
 
 class CreateWebhookIn(BaseModel):

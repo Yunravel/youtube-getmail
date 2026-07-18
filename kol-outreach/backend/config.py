@@ -74,9 +74,68 @@ class Settings:
     MAX_DAILY_SEND_PER_MAILBOX: int = int(os.getenv("MAX_DAILY_SEND_PER_MAILBOX", "30"))
     WARMUP_MIN_DAYS: int = int(os.getenv("WARMUP_MIN_DAYS", "14"))
 
+    # ===== 采集器（KOL 爬虫，内嵌于 services/crawler/）=====
+    # 关键词发现 / 频道 about 抓取 / MX 校验三阶段的并发上限
+    CRAWLER_MAX_CONCURRENCY_DISCOVERY: int = int(os.getenv("CRAWLER_MAX_CONCURRENCY_DISCOVERY", "3"))
+    CRAWLER_MAX_CONCURRENCY_CHANNEL: int = int(os.getenv("CRAWLER_MAX_CONCURRENCY_CHANNEL", "6"))
+    CRAWLER_MAX_CONCURRENCY_MX: int = int(os.getenv("CRAWLER_MAX_CONCURRENCY_MX", "30"))
+    # 单页抓取超时（秒）与请求间隔（秒，礼貌限速）
+    CRAWLER_REQUEST_TIMEOUT: int = int(os.getenv("CRAWLER_REQUEST_TIMEOUT", "20"))
+    CRAWLER_REQUEST_INTERVAL: float = float(os.getenv("CRAWLER_REQUEST_INTERVAL", "0.2"))
+    # User-Agent（与外部邮件平台抓取保持一致风格）
+    CRAWLER_USER_AGENT: str = os.getenv(
+        "CRAWLER_USER_AGENT",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 Chrome/138 Safari/537.36",
+    )
+    # 采集端点鉴权 token（触发采集是带副作用的写入操作，不能公开）。
+    # 前端请求需带 X-Crawler-Token 头；空值或占位符会被判定为未配置。
+    CRAWLER_TOKEN: str = os.getenv("CRAWLER_TOKEN", "")
+    # 住宅代理池。逗号分隔，每项形如 http://user:pass@host:port 或 socks5://host:port。
+    # 数据中心 IP 几乎必被 YouTube 封；生产环境必须配住宅代理。
+    # 留空则直连（仅适合本地开发或住宅网络直接出口）。
+    CRAWLER_PROXIES: str = os.getenv("CRAWLER_PROXIES", "")
+    # 代理轮换策略：round_robin（每次请求轮流用下一个）。
+    CRAWLER_PROXY_STRATEGY: str = os.getenv("CRAWLER_PROXY_STRATEGY", "round_robin")
+    # 定时采集：留空或 false 关闭；填 cron 表达式启用（如 "0 2 * * *" = 每天凌晨2点）
+    # 建议低频（每天或每周），避免被 YouTube 限流。需配合住宅代理池。
+    CRAWLER_SCHEDULE_CRON: str = os.getenv("CRAWLER_SCHEDULE_CRON", "")
+    # 定时采集跑哪些产品（逗号分隔，如 "Dreamina,Pippit"）
+    CRAWLER_SCHEDULE_PRODUCTS: str = os.getenv("CRAWLER_SCHEDULE_PRODUCTS", "Dreamina,Pippit,Kimi,Dola")
+
+    # ===== 采集功能开关（每个独立，默认值可被请求参数覆盖）=====
+    # 多平台扩展：从 YouTube about 抽 IG/TikTok/X 外链生成多平台候选行
+    CRAWLER_ENABLE_ENRICH: bool = os.getenv("CRAWLER_ENABLE_ENRICH", "true").lower() == "true"
+    # 公开邮箱采集 + MX 校验：从 YouTube about 抽邮箱并做 DNS MX 校验
+    CRAWLER_ENABLE_EMAIL: bool = os.getenv("CRAWLER_ENABLE_EMAIL", "true").lower() == "true"
+    # 官网深度邮箱采集：跟进 about 里的官网链接，用浏览器渲染抓 /contact 页邮箱。
+    # 需要 playwright + chromium（pip install playwright && playwright install chromium）。
+    # 默认关：耗时显著增加（每站点起浏览器渲染），且对代理质量要求高。
+    CRAWLER_ENABLE_DEEP_EMAIL: bool = os.getenv("CRAWLER_ENABLE_DEEP_EMAIL", "false").lower() == "true"
+    # 抓取后端：httpx（默认，快但抓不到 JS 渲染站点）/ playwright（慢但能渲染）
+    # 深度邮箱采集强制用 playwright；这里控制 about 页与官网用哪种。
+    CRAWLER_FETCHER: str = os.getenv("CRAWLER_FETCHER", "httpx")
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    @property
+    def crawler_token_is_configured(self) -> bool:
+        """采集端点是否启用了 token 鉴权。
+
+        未配置时端点直接拒绝（触发采集是带副作用的写入，宁可关闭也不公开）。
+        """
+        unsafe = {"", "change-me", "change-me-in-production", "replace-with-a-strong-token"}
+        return (
+            self.CRAWLER_TOKEN not in unsafe
+            and not self.CRAWLER_TOKEN.startswith("replace-with-")
+        )
+
+    @property
+    def crawler_proxies_list(self) -> list[str]:
+        """解析 CRAWLER_PROXIES 为代理 URL 列表（去空白与空项）。"""
+        return [p.strip() for p in self.CRAWLER_PROXIES.split(",") if p.strip()]
 
     @property
     def snov_webhook_is_configured(self) -> bool:

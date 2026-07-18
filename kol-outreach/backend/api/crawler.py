@@ -1,0 +1,210 @@
+"""采集器接口 —— 触发 KOL 采集后台任务 + 查询进度。
+
+完全复刻 ``api/threads.py`` 的 AI 回填任务模式：
+- 内存态任务表 ``_crawl_jobs``（重启丢失可接受，任务幂等可重跑）
+- 单并发（同时只允许一个采集任务，冲突 409）
+- ``BackgroundTasks`` 调度，立即返回 job_id
+- 前端轮询 ``/crawler/status`` 看进度
+
+鉴权：所有端点强制 ``X-Crawler-Token`` 头（与 webhook token 同模式，
+``hmac.compare_digest``）。触发采集是带副作用的写入（真实抓取 + DNS + 写库），
+绝不能像只读看板那样公开。
+"""
+import hmac
+import threading
+import uuid
+from datetime import datetime
+from typing import Optional
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
+from pydantic import BaseModel, field_validator, model_validator
+from sqlalchemy.orm import Session
+
+from config import settings
+from db import SessionLocal, get_db
+from services.crawler.config_rules import productTerms
+
+router = APIRouter()
+
+# ===== 采集后台任务的内存状态（重启丢失可接受，任务幂等可重跑）=====
+# 同时只允许一个采集任务在跑，避免并发抓取叠加以致被限速/封禁。
+_crawl_jobs: dict[str, dict] = {}
+
+# 本地开发放行：这些 Host 视为可信同源，跳过 token 校验。
+# 生产部署在公网域名上，Host 不会命中这里，仍强制 token。
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def require_crawler_token(
+    request: Request,
+    x_crawler_token: str = Header(default=""),
+) -> None:
+    """采集端点鉴权依赖。比对 X-Crawler-Token 头与配置的 CRAWLER_TOKEN。
+
+    - 本地开发放行：请求 Host 为 localhost/127.0.0.1/::1 时跳过校验，
+      免配 token 即可使用（vite dev 代理、本机直连都符合）
+    - 生产（公网域名）：
+        - 未配置 token（空/占位符）→ 503（宁可关闭也不公开带副作用的端点）
+        - 不匹配 → 401
+    用恒定时间比较防时序侧信道，与 webhook token 校验一致。
+
+    安全性说明：
+      只看 Host 头（request.url.hostname），不看 client.host（TCP 对端 IP）。
+      因为生产部署走反向代理（Caddy/Traefik），后端看到的 client.host 永远是
+      代理的内网 IP（127.0.0.1 或 172.x），用它判断会把生产误判为"本地"放行。
+      反向代理默认保留原始 Host 头（公网域名），所以 url.hostname 能正确区分。
+    """
+    host = (request.url.hostname or "").lower()
+    if host in _LOCAL_HOSTS:
+        return  # 本地开发放行
+
+    if not settings.crawler_token_is_configured:
+        raise HTTPException(503, "Crawler token not configured; endpoint disabled")
+    if not x_crawler_token or not hmac.compare_digest(x_crawler_token, settings.CRAWLER_TOKEN):
+        raise HTTPException(401, "Invalid crawler token")
+
+
+class CrawlIn(BaseModel):
+    """采集请求体。
+
+    两种模式二选一：
+    - 产品模式：选 products（用词表展开查询），products 不能为空
+    - 自定义模式：products 留空 + 传 custom_queries，用自定义关键词跑
+      （不限于词表，可随时补充新词扩大覆盖）
+    """
+    products: list[str] = []         # 产品名子集，须在 productTerms 内
+    custom_queries: list[str] = []   # 自定义查询词（与产品词表正交，可自由扩展）
+    enable_enrich: bool = True       # 多平台外链扩展（IG/TikTok/X）
+    enable_email: bool = True        # 公开邮箱采集 + MX 校验（YouTube about）
+    enable_deep_email: bool = False  # 官网深度邮箱采集（需 Playwright + 代理，慢，默认关）
+
+    @field_validator("products")
+    @classmethod
+    def _validate_products(cls, v: list[str]) -> list[str]:
+        unknown = [p for p in v if p not in productTerms]
+        if unknown:
+            raise ValueError(f"未知产品: {unknown}，可选: {list(productTerms.keys())}")
+        # 去重保序
+        seen: list[str] = []
+        for p in v:
+            if p not in seen:
+                seen.append(p)
+        return seen
+
+    @field_validator("custom_queries")
+    @classmethod
+    def _validate_custom_queries(cls, v: list[str]) -> list[str]:
+        # 清洗：去空白、去空、去重保序、长度限制
+        seen: list[str] = []
+        for q in v:
+            q = (q or "").strip()
+            if q and len(q) <= 200 and q not in seen:
+                seen.append(q)
+        return seen[:500]  # 单次最多 500 个自定义词，防止滥用
+
+    @model_validator(mode="after")
+    def _at_least_one_source(self):
+        if not self.products and not self.custom_queries:
+            raise ValueError("至少选一个产品，或提供自定义关键词")
+        return self
+
+
+def _run_crawl_job(
+    job_id: str,
+    products: list[str],
+    enable_enrich: bool,
+    enable_email: bool,
+    custom_queries: list[str] | None = None,
+    enable_deep_email: bool = False,
+) -> None:
+    """后台任务函数：被 BackgroundTasks 调度，更新内存 job 状态。
+
+    独立 session（后台任务跨请求生命周期，不能复用请求 session）。
+    """
+    job = _crawl_jobs[job_id]
+    job["phase"] = "discovery"
+    job["processed"] = 0
+    job["total"] = 0
+
+    def on_progress(done: int, total: int, phase: str) -> None:
+        job["processed"] = done
+        job["total"] = total
+        job["phase"] = phase
+
+    # 后台任务用独立 session；任务结束关闭
+    db = SessionLocal()
+    try:
+        from services.crawler import run_crawl
+        result = run_crawl(
+            products,
+            enable_enrich=enable_enrich,
+            enable_email=enable_email,
+            enable_deep_email=enable_deep_email,
+            on_progress=on_progress,
+            commit=True,
+            db=db,
+            batch=job["batch"],
+            custom_queries=custom_queries or [],
+        )
+        job["status"] = "done"
+        job["result"] = result
+        job["finished_at"] = datetime.utcnow().isoformat()
+    except Exception as e:
+        job["status"] = "failed"
+        job["error"] = str(e)
+        job["finished_at"] = datetime.utcnow().isoformat()
+    finally:
+        db.close()
+
+
+@router.get("/products")
+def list_products(_=Depends(require_crawler_token)):
+    """返回可选产品列表 + 关键词数（供前端渲染复选框）。"""
+    return [
+        {"product": p, "keyword_count": len(kws)}
+        for p, kws in productTerms.items()
+    ]
+
+
+@router.post("")
+def start_crawl(
+    body: CrawlIn,
+    background_tasks: BackgroundTasks,
+    _=Depends(require_crawler_token),
+):
+    """触发采集后台任务。立即返回 job_id，前端轮询 /crawler/status 看进度。
+
+    同时只允许一个采集任务在跑（避免并发抓取叠加被限速）。
+    """
+    running = [j for j in _crawl_jobs.values() if j["status"] == "running"]
+    if running:
+        raise HTTPException(409, f"已有采集任务在跑: {running[0]['job_id']}")
+
+    job_id = str(uuid.uuid4())[:8]
+    _crawl_jobs[job_id] = {
+        "job_id": job_id,
+        "status": "running",
+        "phase": "queued",
+        "processed": 0,
+        "total": 0,
+        "products": body.products,
+        "custom_queries": body.custom_queries,
+        "enable_enrich": body.enable_enrich,
+        "enable_email": body.enable_email,
+        "enable_deep_email": body.enable_deep_email,
+        "batch": f"crawl-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+        "started_at": datetime.utcnow().isoformat(),
+    }
+    background_tasks.add_task(
+        _run_crawl_job, job_id, body.products, body.enable_enrich,
+        body.enable_email, body.custom_queries, body.enable_deep_email,
+    )
+    return {"job_id": job_id, "batch": _crawl_jobs[job_id]["batch"]}
+
+
+@router.get("/status")
+def crawl_status(_=Depends(require_crawler_token)):
+    """查最新采集任务进度。返回最近一个 job 的状态（复刻 /threads/backfill-status）。"""
+    if not _crawl_jobs:
+        return {"job_id": None, "status": "idle"}
+    return list(_crawl_jobs.values())[-1]

@@ -44,6 +44,12 @@ const routes = [
         meta: { title: '导入 KOL' },
       },
       {
+        path: 'crawler',
+        name: 'Crawler',
+        component: () => import('../views/Crawler.vue'),
+        meta: { title: '采集 KOL' },
+      },
+      {
         path: 'stats',
         name: 'Stats',
         component: () => import('../views/Stats.vue'),

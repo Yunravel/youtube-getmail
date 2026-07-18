@@ -14,6 +14,14 @@ httpx>=0.27.0
 # Excel 读写（xlsx 导入/导出，HotLead 报价单生成）
 openpyxl>=3.1.0
 
+# DNS 解析（采集器 MX 校验：services/crawler/）
+dnspython>=2.6.0
+
+# 浏览器渲染（采集器官网深度邮箱：services/crawler/fetcher.py PlaywrightFetcher）
+# 可选——只有启用 CRAWLER_ENABLE_DEEP_EMAIL=true 时才需要。
+# 安装后还要跑 `playwright install chromium` 下载浏览器。
+playwright>=1.40.0
+
 # PostgreSQL driver for production
 psycopg2-binary>=2.9.0
 

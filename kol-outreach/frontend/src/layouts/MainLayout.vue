@@ -36,6 +36,10 @@
           <upload-outlined />
           <span>导入 KOL</span>
         </a-menu-item>
+        <a-menu-item key="/crawler">
+          <radar-chart-outlined />
+          <span>采集 KOL</span>
+        </a-menu-item>
         <a-menu-item key="/stats">
           <bar-chart-outlined />
           <span>统计</span>
@@ -65,6 +69,7 @@ import {
   MailOutlined,
   TeamOutlined,
   UploadOutlined,
+  RadarChartOutlined,
   BarChartOutlined,
 } from '@ant-design/icons-vue'
 

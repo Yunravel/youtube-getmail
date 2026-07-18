@@ -8,6 +8,7 @@
 - **AI 意向分析**:KOL 回信自动分级(Hot/Medium/Low/Negative),运营只看高意向
 - **运营 Web 中台**:Hot Lead 看板 / 邮箱与会话详情 / 分配 / 内部备注
 - **邮箱收件管理**:会话搜索、Campaign/收发账户筛选、已读、星标、附件提示和分页；每 2 分钟刷新
+- **KOL 采集(内嵌爬虫)**:按产品关键词发现 YouTube 频道 → 抓取 about 公开邮箱(MX 校验) → 多平台扩展(IG/TikTok/X) → 入大数据库与发信池;Web UI 触发后台任务,实时进度
 - **人工跟进**:中台不代发邮件；运营在 Snov 中人工回复
 
 ## 🏗️ 架构
@@ -27,6 +28,7 @@ Snov 收到回信 ──────→ campaign_reply/received webhook ─┼�
 | 前端 | Vue3 + Vite + Ant Design Vue |
 | 数据库 | SQLite(开发) / PostgreSQL(生产) |
 | AI | OpenAI GPT-4o-mini(意向) / GPT-4o(开场白) |
+| 采集 | httpx + dnspython(MX 校验) + 可插拔 Fetcher |
 | 邮件来源 | Snov.io Webhook |
 | 部署 | Docker Compose |
 
@@ -185,6 +187,7 @@ python -m scripts.sync_snov_contacts
 | POST | /api/kols/import-csv | 批量导入 KOL |
 | GET | /api/kols | KOL 列表(分页+筛选) |
 | POST | /api/snov/sync-contacts | 从 Snov 全部有效名单同步联系人 |
+| POST | /api/snov/prospect-lists/from-kols | 将勾选的待发 KOL 写入新建的 Snov 待发送名单 |
 | GET | /api/threads | 会话看板(按意向分排序) |
 | GET | /api/threads/{id} | 会话详情(邮件+AI+备注) |
 | GET | /api/mailbox | 邮箱会话列表、搜索、筛选、分页与文件夹计数 |

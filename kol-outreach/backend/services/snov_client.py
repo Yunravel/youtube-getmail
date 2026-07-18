@@ -1,7 +1,8 @@
-"""Snov.io API 客户端：管理 webhook 和读取 Campaign 数据。"""
+"""Snov.io API 客户端：管理联系人、webhook 和 Campaign 数据。"""
 import logging
 import time
 from typing import Any, Optional
+from urllib.parse import urlencode
 
 import httpx
 
@@ -111,6 +112,62 @@ class SnovClient:
         response.raise_for_status()
         payload: Any = response.json()
         return payload if isinstance(payload, list) else payload.get("data", [])
+
+    def _legacy_post(self, path: str, fields: list[tuple[str, Any]]) -> Any:
+        """Call a legacy form-encoded v1 endpoint and refresh once on 401."""
+        token = self._get_token()
+
+        def send(access_token: str) -> httpx.Response:
+            body = urlencode([("access_token", access_token), *fields]).encode("utf-8")
+            return self._client.post(
+                path,
+                content=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+
+        response = send(token)
+        if response.status_code == 401:
+            self._token = None
+            self._token_expires_at = 0
+            response = send(self._get_token())
+        response.raise_for_status()
+        return response.json()
+
+    def create_prospect_list(self, name: str) -> Any:
+        """Create an empty prospect list and return Snov's raw response."""
+        return self._legacy_post("/v1/lists", [("name", name)])
+
+    def add_prospect_to_list(self, list_id: str, prospect: dict) -> dict:
+        """Add or update one prospect without creating an email duplicate."""
+        fields: list[tuple[str, Any]] = [
+            ("email", prospect["email"]),
+            ("listId", str(list_id)),
+            ("updateContact", "true"),
+            ("createDuplicates", "false"),
+        ]
+        scalar_fields = {
+            "fullName": "fullName",
+            "firstName": "firstName",
+            "lastName": "lastName",
+            "country": "country",
+            "locality": "locality",
+            "position": "position",
+            "companyName": "companyName",
+            "companySite": "companySite",
+        }
+        for source, target in scalar_fields.items():
+            value = prospect.get(source)
+            if value not in (None, ""):
+                fields.append((target, str(value)))
+        for phone in prospect.get("phones") or []:
+            if phone:
+                fields.append(("phones", str(phone)))
+        linkedin = prospect.get("linkedin_url")
+        if linkedin:
+            fields.append(("socialLinks[linkedIn]", str(linkedin)))
+
+        payload = self._legacy_post("/v1/add-prospect-to-list", fields)
+        return payload if isinstance(payload, dict) else {"success": False, "errors": payload}
 
     def get_prospects_in_list(
         self, list_id: str, page: int = 1, per_page: int = 5000
