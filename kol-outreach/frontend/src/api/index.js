@@ -75,6 +75,9 @@ export const operatorApi = {
 export const statsApi = {
   overview: () => api.get('/stats/overview'),
   intentDistribution: () => api.get('/stats/intent-distribution'),
+  campaignProjects: () => api.get('/stats/campaign-projects'),
+  campaignRates: (project = 'all') =>
+    api.get('/stats/campaign-rates', { params: { project } }),
 }
 
 // ===== Snov 营销活动 =====
@@ -98,6 +101,12 @@ const CRAWLER_TOKEN_HEADERS = (() => {
 export const crawlerApi = {
   // 可选产品列表 + 关键词数（渲染复选框）
   products: () => api.get('/crawler/products', { headers: CRAWLER_TOKEN_HEADERS }),
+  createProduct: (name, keywords) =>
+    api.post('/crawler/products', { name, keywords }, { headers: CRAWLER_TOKEN_HEADERS }),
+  updateProduct: (id, name, keywords) =>
+    api.put(`/crawler/products/${id}`, { name, keywords }, { headers: CRAWLER_TOKEN_HEADERS }),
+  deleteProduct: (id) =>
+    api.delete(`/crawler/products/${id}`, { headers: CRAWLER_TOKEN_HEADERS }),
   // 触发采集（后台任务），立即返回 job_id
   // products 和 customQueries 至少有一个非空
   start: (products, {
@@ -109,6 +118,29 @@ export const crawlerApi = {
       { headers: CRAWLER_TOKEN_HEADERS }),
   // 查询最新采集任务进度（前端定时轮询）
   status: () => api.get('/crawler/status', { headers: CRAWLER_TOKEN_HEADERS }),
+}
+
+// ===== 邮箱凭据管理（IMAP 附件同步用）=====
+export const mailboxCredentialApi = {
+  list: () => api.get('/mailbox-credentials'),
+  status: () => api.get('/mailbox-credentials/status'),
+  create: (data) => api.post('/mailbox-credentials', data),
+  update: (id, data) => api.put(`/mailbox-credentials/${id}`, data),
+  remove: (id) => api.delete(`/mailbox-credentials/${id}`),
+  // 从发信平台批量导入已配置的发信邮箱（密码留空待填）
+  importFromProvider: () => api.post('/mailbox-credentials/import-from-provider'),
+}
+
+// ===== 附件同步与下载 =====
+export const attachmentApi = {
+  // 手动触发同步，since_days=null/0 表示全部历史；返回 job_id
+  sync: (sinceDays = 30) => api.post('/attachments/sync', { since_days: sinceDays }),
+  // 查同步进度（传 job_id 查指定；不传查最近一个）
+  syncStatus: (jobId = null) =>
+    api.get('/attachments/sync/status', { params: jobId ? { job_id: jobId } : {} }),
+  // 本地附件下载 URL（直接拼，不走 axios）
+  downloadUrl: (messageId, filename) =>
+    `/api/attachments/download/${messageId}/${encodeURIComponent(filename)}`,
 }
 
 export default api

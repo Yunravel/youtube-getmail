@@ -1,0 +1,7 @@
+interface:
+  display_name: "KOL-Find"
+  short_description: "Find and screen creator/KOL prospect lists"
+  brand_color: "#2563EB"
+  default_prompt: "Use $kol-find to find KOLs for this campaign; guide me through the setup if my criteria are incomplete."
+policy:
+  allow_implicit_invocation: true

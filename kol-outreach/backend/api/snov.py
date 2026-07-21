@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from db import get_db
 from models import Kol, Message, Thread
 from services.ai_intent import analyze_intent, intent_to_thread_status
-from services.attachments import extract_attachments
+from services.attachments import extract_attachments, extract_links_from_text, merge_attachments
 from services.email_content import clean_email_body, is_html_email_body
 from services.snov_client import get_snov_client
 from services.snov_contacts import sync_snov_contacts
@@ -288,7 +288,10 @@ def sync_historical_replies(db: Session = Depends(get_db)):
                         or record.get("visitedAt")
                         or record.get("visited_at")
                     )
-                    attachments = extract_attachments(record, reply)
+                    attachments = merge_attachments(
+                        extract_attachments(record, reply),
+                        extract_links_from_text(raw_body),
+                    )
                     recipient_email = _text(
                         reply.get("recipientEmail")
                         or reply.get("recipient_email")

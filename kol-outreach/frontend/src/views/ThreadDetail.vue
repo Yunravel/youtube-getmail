@@ -113,17 +113,19 @@
                   <div class="attachment-heading">附件</div>
                   <a
                     v-for="(attachment, index) in msg.attachments"
-                    :key="attachment.id || attachment.url || `${msg.id}-${index}`"
+                    :key="attachment.id || attachment.url || attachment.local_path || `${msg.id}-${index}`"
                     class="attachment-item"
-                    :href="attachment.url || undefined"
+                    :href="attachmentHref(msg.id, attachment) || undefined"
                     :target="attachment.url ? '_blank' : undefined"
                     :rel="attachment.url ? 'noopener noreferrer' : undefined"
-                    @click="!attachment.url && $event.preventDefault()"
+                    :download="attachment.local_path ? attachment.name : undefined"
+                    @click="!attachment.url && !attachment.local_path && $event.preventDefault()"
                   >
                     <PaperClipOutlined />
                     <span>{{ attachment.name || '附件' }}</span>
                     <small v-if="attachment.size">{{ formatBytes(attachment.size) }}</small>
-                    <small v-if="!attachment.url">Snov 未提供下载地址</small>
+                    <small v-if="attachment.source === 'imap'" class="attach-source">本地</small>
+                    <small v-if="!attachment.url && !attachment.local_path">无法下载</small>
                   </a>
                 </div>
 
@@ -303,6 +305,15 @@ function formatBytes(value) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+// 附件下载链接：本地附件走中台下载端点，网盘链接直接外链
+function attachmentHref(messageId, attachment) {
+  if (attachment.local_path) {
+    const filename = attachment.local_path.split('/').pop()
+    return `/api/attachments/download/${messageId}/${encodeURIComponent(filename)}`
+  }
+  return attachment.url || ''
 }
 
 function formatBudget(value) {
@@ -613,6 +624,14 @@ onUnmounted(() => {
 .attachment-item small {
   color: #64748b;
   white-space: nowrap;
+}
+
+.attachment-item small.attach-source {
+  color: #16a34a;
+  background: #f0fdf4;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
 }
 
 .message-insight :deep(svg) {

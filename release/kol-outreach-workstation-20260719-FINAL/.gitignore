@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite3
+database/*.dump
+database/manual-backups/
+.env
+.env.prod
+backend/.env
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+npm-debug.log*
+
+# Runtime logs
+backend/logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 测试文件
+test_kol.csv

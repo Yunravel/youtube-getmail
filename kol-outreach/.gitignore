@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *.db
 *.sqlite3
+database/*.dump
+database/manual-backups/
 .env
 .env.prod
 backend/.env
@@ -12,6 +14,7 @@ venv/
 # Node
 node_modules/
 dist/
+.vite/
 npm-debug.log*
 
 # Runtime logs
@@ -28,3 +31,7 @@ Thumbs.db
 
 # 测试文件
 test_kol.csv
+
+# IMAP 同步的附件文件（用户上传/抓取的 KOL 资料，含敏感内容不进仓库）
+backend/data/
+*/data/attachments/

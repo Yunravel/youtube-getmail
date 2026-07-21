@@ -23,6 +23,7 @@ from typing import Callable, Optional
 
 from db import SessionLocal
 from models import Kol, Message
+from scripts._parse_utils import parse_int
 from services.ai_profile import extract_profile
 
 logger = logging.getLogger(__name__)
@@ -150,13 +151,10 @@ def run_backfill(
                     value = profile.get(ai_field)
                     if value is None:
                         continue
-                    # followers_count 转 int
+                    # followers_count 转 int（复用 parse_int 支持 k/m 单位与千分位）
                     if ai_field == "followers_count":
-                        try:
-                            value = int(float(str(value).replace(",", "")))
-                            if value <= 0:
-                                continue
-                        except (ValueError, TypeError):
+                        value = parse_int(value)
+                        if not value or value <= 0:
                             continue
                     current = getattr(kol, kol_col, None)
                     if force or not current:

@@ -17,7 +17,7 @@ from config import settings
 from db import SessionLocal, get_db
 from models import Kol, Message, Thread
 from services.email_content import clean_email_body, is_html_email_body
-from services.attachments import extract_attachments
+from services.attachments import extract_attachments, extract_links_from_text, merge_attachments
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -157,7 +157,10 @@ def _message_fields(payload: dict[str, Any], direction: str) -> dict[str, Option
         "message_id": message_id,
         "in_reply_to": in_reply_to or None,
         "received_at": received_at,
-        "attachments": extract_attachments(payload, email_data),
+        "attachments": merge_attachments(
+            extract_attachments(payload, email_data),
+            extract_links_from_text(raw_body),
+        ),
     }
 
 

@@ -46,6 +46,7 @@ services:
       - SNOV_WEBHOOK_TOKEN=${SNOV_WEBHOOK_TOKEN:?Set SNOV_WEBHOOK_TOKEN in .env.prod}
       - SNOV_CLIENT_ID=${SNOV_CLIENT_ID:-}
       - SNOV_CLIENT_SECRET=${SNOV_CLIENT_SECRET:-}
+      - CRAWLER_TOKEN=${CRAWLER_TOKEN:?Set CRAWLER_TOKEN in .env.prod}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
     expose:
       - "8000"
@@ -62,6 +63,10 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    environment:
+      # Caddy adds this server-side token only when proxying crawler APIs.
+      # It is not compiled into or returned with the frontend JavaScript.
+      - CRAWLER_TOKEN=${CRAWLER_TOKEN:?Set CRAWLER_TOKEN in .env.prod}
     volumes:
       - caddy-data:/data
       - caddy-config:/config

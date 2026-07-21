@@ -1,0 +1,31 @@
+# KOL 外联中台 - 一键启动
+# 用法: docker-compose up -d
+services:
+  backend:
+    build: ./backend
+    container_name: kol-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./data/kol_outreach.db
+      - DEBUG=false
+    env_file:
+      - ./backend/.env
+    volumes:
+      - backend-data:/app/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_SNOV_INBOX_URL: ${VITE_SNOV_INBOX_URL:-}
+    container_name: kol-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  backend-data:

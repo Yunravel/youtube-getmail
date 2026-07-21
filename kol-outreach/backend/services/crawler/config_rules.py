@@ -185,15 +185,19 @@ socialHandleExcluded: set[str] = {
 }
 
 
-def make_queries(products: list[str]) -> list[tuple[str, str]]:
+def make_queries(
+    products: list[str],
+    custom_product_terms: dict[str, list[str]] | None = None,
+) -> list[tuple[str, str]]:
     """生成 (产品, 查询词) 列表。与 Node makeQueries 逻辑一致。
 
     非 Dola 产品：每个词生成 term / term+generic / region+term 三组
     Dola 产品：每个词生成 term tips（词本身已带 UK 前缀）
     """
     entries: list[tuple[str, str]] = []
+    custom_product_terms = custom_product_terms or {}
     for product in products:
-        terms = productTerms.get(product, [])
+        terms = productTerms.get(product, custom_product_terms.get(product, []))
         for index, term in enumerate(terms):
             entries.append((product, term))
             if product == "Dola":

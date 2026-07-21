@@ -1,0 +1,67 @@
+# Windows 工作站迁移版：PostgreSQL + FastAPI + Vue/Caddy
+# 启动请使用 tools/install-workstation.ps1，不要直接跳过数据库恢复步骤。
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: kol-workstation-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kol_outreach
+      POSTGRES_USER: kol
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Missing POSTGRES_PASSWORD in .env.prod}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - workstation-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kol -d kol_outreach"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  backend:
+    build: ./backend
+    container_name: kol-workstation-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://kol:${POSTGRES_PASSWORD}@db:5432/kol_outreach
+      DEBUG: "false"
+      HOST: 0.0.0.0
+      PORT: 8000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL_INTENT: ${OPENAI_MODEL_INTENT:-gpt-4o-mini}
+      OPENAI_MODEL_PERSONALIZE: ${OPENAI_MODEL_PERSONALIZE:-gpt-4o}
+      SNOV_WEBHOOK_TOKEN: ${SNOV_WEBHOOK_TOKEN}
+      SNOV_CLIENT_ID: ${SNOV_CLIENT_ID:-}
+      SNOV_CLIENT_SECRET: ${SNOV_CLIENT_SECRET:-}
+      SNOV_SYNC_ENABLED: ${SNOV_SYNC_ENABLED:-true}
+      SNOV_SYNC_INTERVAL_SECONDS: ${SNOV_SYNC_INTERVAL_SECONDS:-120}
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - workstation-backend-logs:/app/logs
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_SNOV_INBOX_URL: ${VITE_SNOV_INBOX_URL:-}
+    container_name: kol-workstation-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
+
+volumes:
+  workstation-db-data:
+    name: kol-workstation-db-data
+  workstation-backend-logs:
+    name: kol-workstation-backend-logs

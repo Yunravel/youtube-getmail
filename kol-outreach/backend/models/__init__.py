@@ -2,6 +2,8 @@
 from models.operator import Operator
 from models.kol import Kol
 from models.kol_candidate import KolCandidate
+from models.crawler_product import CrawlerProduct
+from models.mailbox_credential import MailboxCredential
 from models.kol_email import KolEmail
 from models.project_assessment import ProjectAssessment
 from models.thread import Thread
@@ -9,4 +11,4 @@ from models.message import Message
 from models.note import Note
 from models.send_log import SendLog
 
-__all__ = ["Operator", "Kol", "KolCandidate", "KolEmail", "ProjectAssessment", "Thread", "Message", "Note", "SendLog"]
+__all__ = ["Operator", "Kol", "KolCandidate", "CrawlerProduct", "MailboxCredential", "KolEmail", "ProjectAssessment", "Thread", "Message", "Note", "SendLog"]

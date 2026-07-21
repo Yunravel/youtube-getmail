@@ -1,4 +1,12 @@
 (kol_app) {
+    # The crawler API is protected by an internal shared token. In production,
+    # Caddy injects it server-side so it never needs to be bundled into the SPA.
+    handle /api/crawler* {
+        reverse_proxy backend:8000 {
+            header_up X-Crawler-Token {$CRAWLER_TOKEN}
+        }
+    }
+
     handle /api/* {
         reverse_proxy backend:8000
     }

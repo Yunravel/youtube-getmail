@@ -40,6 +40,10 @@
           <radar-chart-outlined />
           <span>采集 KOL</span>
         </a-menu-item>
+        <a-menu-item key="/mailbox-settings">
+          <setting-outlined />
+          <span>邮箱配置</span>
+        </a-menu-item>
         <a-menu-item key="/stats">
           <bar-chart-outlined />
           <span>统计</span>
@@ -71,6 +75,7 @@ import {
   UploadOutlined,
   RadarChartOutlined,
   BarChartOutlined,
+  SettingOutlined,
 } from '@ant-design/icons-vue'
 
 const route = useRoute()

@@ -1,0 +1,119 @@
+# KOL 外联中台 - 生产部署版(飞牛 NAS Docker)
+# 用法:
+#   1. 复制 .env.prod.example 为 .env.prod,填入真实配置
+#   2. docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#
+# 部署后:
+#   中台后端: http://NAS_IP:8000
+#   webhook:  https://kol.你的域名.com/api/webhook/snov
+services:
+  # ===== 数据库 =====
+  db:
+    image: postgres:16-alpine
+    container_name: kol-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kol_outreach
+      POSTGRES_USER: kol
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.prod}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kol"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kol-net
+
+  # ===== 中台后端 =====
+  backend:
+    build: ./backend
+    container_name: kol-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://kol:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.prod}@db:5432/kol_outreach
+      - DEBUG=false
+      - HOST=0.0.0.0
+      - PORT=8000
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - OPENAI_MODEL_INTENT=${OPENAI_MODEL_INTENT:-gpt-4o-mini}
+      - OPENAI_MODEL_PERSONALIZE=${OPENAI_MODEL_PERSONALIZE:-gpt-4o}
+      - SNOV_WEBHOOK_TOKEN=${SNOV_WEBHOOK_TOKEN:?Set SNOV_WEBHOOK_TOKEN in .env.prod}
+      - SNOV_CLIENT_ID=${SNOV_CLIENT_ID:-}
+      - SNOV_CLIENT_SECRET=${SNOV_CLIENT_SECRET:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+    expose:
+      - "8000"
+    networks:
+      - kol-net
+
+  # ===== 运营看板 + API 反代 =====
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_SNOV_INBOX_URL: ${VITE_SNOV_INBOX_URL:-}
+    container_name: kol-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=kol-outreach_kol-net"
+      - "traefik.http.routers.kol.rule=Host(`${KOL_PUBLIC_DOMAIN:?Set KOL_PUBLIC_DOMAIN in .env.prod}`)"
+      - "traefik.http.routers.kol.entrypoints=websecure"
+      - "traefik.http.routers.kol.tls=true"
+      - "traefik.http.routers.kol.tls.certresolver=letsencrypt"
+      - "traefik.http.services.kol.loadbalancer.server.port=80"
+    networks:
+      - kol-net
+
+  # ===== HTTPS 证书与公网入口 =====
+  # Traefik 原生支持 DNSPod 的 DNS-01 校验，绕开运营商对公网 80 的限制。
+  traefik:
+    image: traefik:v3.7.6
+    container_name: kol-traefik
+    restart: unless-stopped
+    depends_on:
+      - frontend
+    command:
+      - "--log.level=INFO"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=kol-outreach_kol-net"
+      # 云服务器已开放 80/443，使用标准 HTTP-01 自动签发与续期证书。
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@20020525.xyz}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.keytype=EC256"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+    ports:
+      # 云服务器直接使用标准 HTTP/HTTPS 端口。
+      - "${KOL_HTTP_PORT:-80}:80"
+      - "${KOL_HTTPS_PORT:-443}:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-data:/letsencrypt
+    networks:
+      - kol-net
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:
+  traefik-data:
+
+networks:
+  kol-net:
+    driver: bridge

@@ -187,6 +187,40 @@ class SnovClient:
         payload: Any = response.json()
         return payload if isinstance(payload, dict) else {"prospects": []}
 
+    def get_campaign_analytics(
+        self,
+        campaign_id: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        sender_email: Optional[str] = None,
+        campaign_owner: Optional[str] = None,
+    ) -> dict:
+        """Read aggregate campaign KPIs (opens / replies / clicks / ...).
+
+        Wraps Snov's v2 ``/statistics/campaign-analytics`` endpoint.
+        ``date_from`` / ``date_to`` are REQUIRED by Snov and must be
+        ``yyyy-mm-dd``; we default to the last 365 days so callers can pull
+        an account-wide summary without supplying dates.
+        """
+        from datetime import date, timedelta
+
+        today = date.today()
+        default_from = today - timedelta(days=365)
+        params: dict[str, Any] = {
+            "date_from": date_from or default_from.strftime("%Y-%m-%d"),
+            "date_to": date_to or today.strftime("%Y-%m-%d"),
+        }
+        if campaign_id:
+            # Snov accepts multiple IDs as a comma-separated string.
+            params["campaign_id"] = campaign_id
+        if sender_email:
+            params["sender_email"] = sender_email
+        if campaign_owner:
+            params["campaign_owner"] = campaign_owner
+
+        payload = self._request("GET", "/v2/statistics/campaign-analytics", params=params)
+        return payload if isinstance(payload, dict) else {"data": payload}
+
     def get_campaign_replies(self, campaign_id: str) -> dict | list:
         """Read email replies only, excluding LinkedIn replies."""
         # Despite the current knowledge-base spelling (`campaign_id`), the

@@ -1,0 +1,20 @@
+(kol_app) {
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+
+    handle /health {
+        reverse_proxy backend:8000
+    }
+
+    handle {
+        root * /usr/share/caddy
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# HTTPS 由前置 Traefik 处理；Caddy 仅负责站点与 API 反代。
+:80 {
+    import kol_app
+}

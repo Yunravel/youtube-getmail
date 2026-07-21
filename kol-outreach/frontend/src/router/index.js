@@ -50,6 +50,12 @@ const routes = [
         meta: { title: '采集 KOL' },
       },
       {
+        path: 'mailbox-settings',
+        name: 'MailboxSettings',
+        component: () => import('../views/MailboxSettings.vue'),
+        meta: { title: '邮箱配置' },
+      },
+      {
         path: 'stats',
         name: 'Stats',
         component: () => import('../views/Stats.vue'),

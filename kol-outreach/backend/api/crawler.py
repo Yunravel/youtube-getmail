@@ -17,11 +17,13 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config import settings
 from db import SessionLocal, get_db
+from models import CrawlerProduct
 from services.crawler.config_rules import productTerms
 
 router = APIRouter()
@@ -72,7 +74,7 @@ class CrawlIn(BaseModel):
     - 自定义模式：products 留空 + 传 custom_queries，用自定义关键词跑
       （不限于词表，可随时补充新词扩大覆盖）
     """
-    products: list[str] = []         # 产品名子集，须在 productTerms 内
+    products: list[str] = []         # 内置产品或数据库中的自定义产品
     custom_queries: list[str] = []   # 自定义查询词（与产品词表正交，可自由扩展）
     enable_enrich: bool = True       # 多平台外链扩展（IG/TikTok/X）
     enable_email: bool = True        # 公开邮箱采集 + MX 校验（YouTube about）
@@ -81,12 +83,11 @@ class CrawlIn(BaseModel):
     @field_validator("products")
     @classmethod
     def _validate_products(cls, v: list[str]) -> list[str]:
-        unknown = [p for p in v if p not in productTerms]
-        if unknown:
-            raise ValueError(f"未知产品: {unknown}，可选: {list(productTerms.keys())}")
-        # 去重保序
         seen: list[str] = []
         for p in v:
+            p = (p or "").strip()
+            if not p or len(p) > 50:
+                continue
             if p not in seen:
                 seen.append(p)
         return seen
@@ -116,6 +117,7 @@ def _run_crawl_job(
     enable_email: bool,
     custom_queries: list[str] | None = None,
     enable_deep_email: bool = False,
+    custom_product_terms: dict[str, list[str]] | None = None,
 ) -> None:
     """后台任务函数：被 BackgroundTasks 调度，更新内存 job 状态。
 
@@ -145,6 +147,7 @@ def _run_crawl_job(
             db=db,
             batch=job["batch"],
             custom_queries=custom_queries or [],
+            custom_product_terms=custom_product_terms or {},
         )
         job["status"] = "done"
         job["result"] = result
@@ -157,13 +160,123 @@ def _run_crawl_job(
         db.close()
 
 
+class CrawlerProductIn(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    keywords: list[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("name")
+    @classmethod
+    def _clean_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("产品名称不能为空")
+        return value
+
+    @field_validator("keywords")
+    @classmethod
+    def _clean_keywords(cls, values: list[str]) -> list[str]:
+        result: list[str] = []
+        for value in values:
+            value = (value or "").strip()
+            if value and len(value) <= 200 and value not in result:
+                result.append(value)
+        if not result:
+            raise ValueError("至少需要一个有效关键词")
+        return result
+
+
+def _product_out(item: CrawlerProduct) -> dict:
+    return {
+        "id": item.id,
+        "product": item.name,
+        "keyword_count": len(item.keywords or []),
+        "keywords": item.keywords or [],
+        "built_in": False,
+    }
+
+
+def _ensure_name_available(db: Session, name: str, exclude_id: int | None = None) -> None:
+    normalized = name.casefold()
+    if normalized in {value.casefold() for value in productTerms}:
+        raise HTTPException(409, "产品名称与内置产品重复")
+    query = db.query(CrawlerProduct).filter(CrawlerProduct.name_normalized == normalized)
+    if exclude_id is not None:
+        query = query.filter(CrawlerProduct.id != exclude_id)
+    if query.first():
+        raise HTTPException(409, "自定义产品名称已存在")
+
+
 @router.get("/products")
-def list_products(_=Depends(require_crawler_token)):
+def list_products(
+    _=Depends(require_crawler_token),
+    db: Session = Depends(get_db),
+):
     """返回可选产品列表 + 关键词数（供前端渲染复选框）。"""
-    return [
-        {"product": p, "keyword_count": len(kws)}
+    built_in = [
+        {"id": None, "product": p, "keyword_count": len(kws), "keywords": None, "built_in": True}
         for p, kws in productTerms.items()
     ]
+    custom = db.query(CrawlerProduct).order_by(CrawlerProduct.created_at, CrawlerProduct.id).all()
+    return built_in + [_product_out(item) for item in custom]
+
+
+@router.post("/products")
+def create_product(
+    body: CrawlerProductIn,
+    _=Depends(require_crawler_token),
+    db: Session = Depends(get_db),
+):
+    _ensure_name_available(db, body.name)
+    item = CrawlerProduct(
+        name=body.name,
+        name_normalized=body.name.casefold(),
+        keywords=body.keywords,
+    )
+    db.add(item)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "自定义产品名称已存在")
+    db.refresh(item)
+    return _product_out(item)
+
+
+@router.put("/products/{product_id}")
+def update_product(
+    product_id: int,
+    body: CrawlerProductIn,
+    _=Depends(require_crawler_token),
+    db: Session = Depends(get_db),
+):
+    item = db.get(CrawlerProduct, product_id)
+    if not item:
+        raise HTTPException(404, "自定义产品不存在")
+    _ensure_name_available(db, body.name, exclude_id=product_id)
+    item.name = body.name
+    item.name_normalized = body.name.casefold()
+    item.keywords = body.keywords
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "自定义产品名称已存在")
+    db.refresh(item)
+    return _product_out(item)
+
+
+@router.delete("/products/{product_id}")
+def delete_product(
+    product_id: int,
+    _=Depends(require_crawler_token),
+    db: Session = Depends(get_db),
+):
+    item = db.get(CrawlerProduct, product_id)
+    if not item:
+        raise HTTPException(404, "自定义产品不存在")
+    db.delete(item)
+    db.commit()
+    return {"deleted": product_id}
 
 
 @router.post("")
@@ -171,6 +284,7 @@ def start_crawl(
     body: CrawlIn,
     background_tasks: BackgroundTasks,
     _=Depends(require_crawler_token),
+    db: Session = Depends(get_db),
 ):
     """触发采集后台任务。立即返回 job_id，前端轮询 /crawler/status 看进度。
 
@@ -180,6 +294,25 @@ def start_crawl(
     if running:
         raise HTTPException(409, f"已有采集任务在跑: {running[0]['job_id']}")
 
+    custom_rows = db.query(CrawlerProduct).all() if body.products else []
+    custom_by_normalized = {item.name_normalized: item for item in custom_rows}
+    canonical_products: list[str] = []
+    custom_product_terms: dict[str, list[str]] = {}
+    unknown: list[str] = []
+    built_in_by_normalized = {name.casefold(): name for name in productTerms}
+    for requested in body.products:
+        normalized = requested.casefold()
+        if normalized in built_in_by_normalized:
+            canonical_products.append(built_in_by_normalized[normalized])
+        elif normalized in custom_by_normalized:
+            item = custom_by_normalized[normalized]
+            canonical_products.append(item.name)
+            custom_product_terms[item.name] = item.keywords or []
+        else:
+            unknown.append(requested)
+    if unknown:
+        raise HTTPException(422, f"未知产品: {unknown}，请刷新产品列表后重试")
+
     job_id = str(uuid.uuid4())[:8]
     _crawl_jobs[job_id] = {
         "job_id": job_id,
@@ -187,7 +320,7 @@ def start_crawl(
         "phase": "queued",
         "processed": 0,
         "total": 0,
-        "products": body.products,
+        "products": canonical_products,
         "custom_queries": body.custom_queries,
         "enable_enrich": body.enable_enrich,
         "enable_email": body.enable_email,
@@ -196,8 +329,9 @@ def start_crawl(
         "started_at": datetime.utcnow().isoformat(),
     }
     background_tasks.add_task(
-        _run_crawl_job, job_id, body.products, body.enable_enrich,
+        _run_crawl_job, job_id, canonical_products, body.enable_enrich,
         body.enable_email, body.custom_queries, body.enable_deep_email,
+        custom_product_terms,
     )
     return {"job_id": job_id, "batch": _crawl_jobs[job_id]["batch"]}
 

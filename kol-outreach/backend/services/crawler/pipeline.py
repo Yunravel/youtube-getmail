@@ -47,6 +47,7 @@ async def _discover(
     products: list[str],
     on_progress: ProgressFn | None,
     custom_queries: list[str] | None = None,
+    custom_product_terms: dict[str, list[str]] | None = None,
 ) -> list[dict]:
     """阶段 1：平台搜索发现频道 handle。
 
@@ -55,7 +56,7 @@ async def _discover(
     - custom_queries 直接作为查询词（"自定义" 产品标记）
     两者合并去重后跑。返回 ``[{"handle", "products", "queries"}, ...]``。
     """
-    queries = make_queries(products)
+    queries = make_queries(products, custom_product_terms)
     # 合并自定义关键词（标记为 "自定义" 产品，便于后续识别来源）
     for q in (custom_queries or []):
         queries.append(("自定义", q))
@@ -334,6 +335,7 @@ async def _run_async(
     batch: str,
     commit: bool,
     custom_queries: list[str] | None = None,
+    custom_product_terms: dict[str, list[str]] | None = None,
 ) -> dict:
     """异步执行全流水线。"""
     fetcher = HttpxFetcher()
@@ -349,7 +351,9 @@ async def _run_async(
     }
     try:
         # 阶段 1：发现（产品词表 + 自定义关键词）
-        candidates = await _discover(fetcher, products, on_progress, custom_queries)
+        candidates = await _discover(
+            fetcher, products, on_progress, custom_queries, custom_product_terms
+        )
         stats["discovered"] = len(candidates)
 
         # 阶段 2+3：扩展 + 邮箱
@@ -415,11 +419,12 @@ def run_crawl(
     db: Optional[Session] = None,
     batch: str | None = None,
     custom_queries: list[str] | None = None,
+    custom_product_terms: dict[str, list[str]] | None = None,
 ) -> dict:
     """采集总入口（同步包装）。CLI 与 HTTP 端点共用。
 
     参数：
-      products: 产品名列表，如 ["Dreamina", "Pippit"]；须在 productTerms 内。
+      products: 内置或持久化自定义产品名列表，如 ["Dreamina", "Pippit"]。
                 可为空（当只用 custom_queries 时）。
       custom_queries: 自定义查询词，与产品词表正交合并。
                 当 products 为空时，至少要有 custom_queries。
@@ -469,6 +474,7 @@ def run_crawl(
                         on_progress=on_progress,
                         db=db, batch=batch, commit=commit,
                         custom_queries=custom_queries,
+                        custom_product_terms=custom_product_terms,
                     )))
                     new_loop.close()
                 except BaseException as e:
@@ -487,4 +493,5 @@ def run_crawl(
         enable_deep_email=enable_deep_email,
         on_progress=on_progress, db=db, batch=batch, commit=commit,
         custom_queries=custom_queries,
+        custom_product_terms=custom_product_terms,
     ))

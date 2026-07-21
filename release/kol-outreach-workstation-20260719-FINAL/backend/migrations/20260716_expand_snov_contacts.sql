@@ -1,0 +1,38 @@
+-- PostgreSQL production migration: align kol with Snov contact import template.
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS snov_prospect_id VARCHAR(200);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS full_name VARCHAR(300);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS first_name VARCHAR(150);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS last_name VARCHAR(150);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS locality VARCHAR(150);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS position VARCHAR(200);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS company_name VARCHAR(300);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS company_site VARCHAR(500);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS phones VARCHAR(100);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS linkedin_url VARCHAR(500);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS platform VARCHAR(50);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS social_handle VARCHAR(200);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS profile_url VARCHAR(500);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS followers INTEGER DEFAULT 0;
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS priority VARCHAR(2);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS content_category VARCHAR(150);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS source VARCHAR(200);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS contact_notes TEXT;
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS snov_list_id VARCHAR(100);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS snov_list_name VARCHAR(300);
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS snov_list_ids JSON;
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS snov_custom_fields JSON;
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS snov_raw_data JSON;
+ALTER TABLE kol ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;
+
+UPDATE kol SET full_name = name WHERE full_name IS NULL AND name IS NOT NULL;
+UPDATE kol SET profile_url = channel_url WHERE profile_url IS NULL AND channel_url IS NOT NULL;
+UPDATE kol SET followers = subscribers
+WHERE (followers IS NULL OR followers = 0) AND subscribers IS NOT NULL;
+UPDATE kol SET content_category = niche
+WHERE content_category IS NULL AND niche IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ix_kol_snov_prospect_id ON kol (snov_prospect_id);
+CREATE INDEX IF NOT EXISTS ix_kol_snov_list_id ON kol (snov_list_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_kol_email_normalized
+ON kol (lower(trim(email)))
+WHERE email IS NOT NULL AND trim(email) <> '';

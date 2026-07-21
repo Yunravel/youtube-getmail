@@ -70,6 +70,26 @@ class Settings:
         60, int(os.getenv("SNOV_SYNC_INTERVAL_SECONDS", "120"))
     )
 
+    # ===== IMAP 附件同步（直连 Gmail 抓真附件，绕开 Snov）=====
+    # Snov webhook/API 不传附件数据；KOL 的真附件（PDF/图片）只在发信邮箱的
+    # Gmail 收件箱里。这里直连 Gmail IMAP 抓回来，存本地磁盘。
+    # 定时轮询（每 10 分钟）查未读邮件；前端手动触发可指定时间范围。
+    IMAP_SYNC_ENABLED: bool = os.getenv("IMAP_SYNC_ENABLED", "true").lower() == "true"
+    IMAP_SYNC_INTERVAL_SECONDS: int = max(
+        60, int(os.getenv("IMAP_SYNC_INTERVAL_SECONDS", "600"))
+    )
+    # SOCKS5 代理（Clash 等）。国内直连 imap.gmail.com 会被墙，必须走代理。
+    # 127.0.0.1:7897 是 Clash Verge 默认 mixed 端口。
+    IMAP_PROXY_ENABLED: bool = os.getenv("IMAP_PROXY_ENABLED", "true").lower() == "true"
+    IMAP_PROXY_HOST: str = os.getenv("IMAP_PROXY_HOST", "127.0.0.1")
+    IMAP_PROXY_PORT: int = int(os.getenv("IMAP_PROXY_PORT", "7897"))
+    # 附件本地存储目录（相对 backend/ 工作目录）
+    ATTACHMENT_STORAGE_DIR: str = os.getenv("ATTACHMENT_STORAGE_DIR", "./data/attachments")
+    # 邮箱应用专用密码的 Fernet 主密钥（base64 urlsafe，32 字节）。
+    # 缺失时降级为明文存储并打警告（仅适合 dev）。生产必须配。
+    # 生成方法：python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    ATTACHMENT_MASTER_KEY: str = os.getenv("ATTACHMENT_MASTER_KEY", "")
+
     # ===== 发信约束(防封安全阀) =====
     MAX_DAILY_SEND_PER_MAILBOX: int = int(os.getenv("MAX_DAILY_SEND_PER_MAILBOX", "30"))
     WARMUP_MIN_DAYS: int = int(os.getenv("WARMUP_MIN_DAYS", "14"))
@@ -151,5 +171,17 @@ class Settings:
             self.SNOV_WEBHOOK_TOKEN not in unsafe_values
             and not self.SNOV_WEBHOOK_TOKEN.startswith("replace-with-")
         )
+
+    @property
+    def attachment_master_key_configured(self) -> bool:
+        """ATTACHMENT_MASTER_KEY 是否已配置为合法的 Fernet 密钥。"""
+        return bool(self.ATTACHMENT_MASTER_KEY) and self.ATTACHMENT_MASTER_KEY != "change-me"
+
+    @property
+    def attachment_storage_path(self) -> Path:
+        """附件存储目录的绝对 Path（自动创建）。"""
+        p = Path(self.ATTACHMENT_STORAGE_DIR).resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
 
 settings = Settings()

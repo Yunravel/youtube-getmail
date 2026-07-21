@@ -142,8 +142,9 @@ import re
 _AMOUNT_RE = re.compile(
     # 金额：支持千分位逗号(1,200)、空格(1 200)、或不带(1200)。货币符号在前后均可。
     # 用一个统一的"数字体"模式，避免 1200 被切成 120。
-    r"(?:GBP|USD|£|\$)\s*(\d[\d,\s.]*\d|\d)"
-    r"|(\d[\d,\s.]*\d|\d)\s*(?:GBP|USD|£|\$)",
+    # 同时支持 k/K(千) m/M(百万) 单位后缀，避免 "$10k" 被截成 10。
+    r"(?:GBP|USD|£|\$)\s*(\d[\d,\s.]*\d[kKmM]?|\d[kKmM]?)"
+    r"|(\d[\d,\s.]*\d[kKmM]?|\d[kKmM]?)\s*(?:GBP|USD|£|\$)",
     re.IGNORECASE,
 )
 _CURRENCY_HINT = re.compile(r"(GBP|USD|£|\$)", re.IGNORECASE)
@@ -157,6 +158,8 @@ def parse_min_quote(raw: Optional[str]) -> tuple[Optional[int], Optional[str]]:
         "$1200-$1400"                                            -> (1200, "$")
         "£1,500"                                                  -> (1500, "£")
         "$2500 for reel, $3000 for both IG and TikTok"           -> (2500, "$")
+        "$10k" / "$5k" / "$2.5k"                                  -> (10000/5000/2500, "$")
+        "$1.2m"                                                    -> (1200000, "$")
         "rate card attached"                                      -> (None, None)
 
     Returns:
@@ -175,8 +178,13 @@ def parse_min_quote(raw: Optional[str]) -> tuple[Optional[int], Optional[str]]:
         text = (g1 or g2).strip()
         # 去掉千分位逗号和空格
         text = text.replace(",", "").replace(" ", "")
+        # 识别单位后缀 k/K = 千、m/M = 百万（与 scripts/_parse_utils.parse_int 行为一致）
+        mult = 1
+        if text and text[-1] in "kKmM":
+            mult = 1_000 if text[-1].lower() == "k" else 1_000_000
+            text = text[:-1]
         try:
-            val = int(float(text))
+            val = int(float(text) * mult)
         except ValueError:
             continue
         # 过滤明显误匹配：<10 几乎不可能是报价（序号、百分比、版本号）

@@ -30,3 +30,8 @@ alembic>=1.13.0
 
 # Scheduled and recovery jobs
 apscheduler>=3.10.0
+
+# IMAP 附件同步（直连 Gmail 抓真附件，绕开 Snov）
+# PySocks 让 imaplib 走 SOCKS5 代理（Clash），cryptography 加密邮箱应用专用密码
+PySocks>=1.7.1
+cryptography>=41.0

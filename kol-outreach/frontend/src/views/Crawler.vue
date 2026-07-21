@@ -9,18 +9,38 @@
     <a-card title="采集配置" style="margin-bottom: 16px">
       <a-form layout="vertical">
         <a-form-item label="产品选择">
-          <a-checkbox-group v-model:value="selectedProducts" :disabled="running">
-            <a-checkbox
-              v-for="p in products"
-              :key="p.product"
-              :value="p.product"
-            >
-              {{ p.product }}
-              <a-tag color="blue" size="small">{{ p.keyword_count }} 词</a-tag>
-            </a-checkbox>
-          </a-checkbox-group>
+          <div class="product-list">
+            <div v-for="p in products" :key="p.product" class="product-item">
+              <a-checkbox
+                :checked="selectedProducts.includes(p.product)"
+                :disabled="running"
+                @change="event => toggleProduct(p.product, event.target.checked)"
+              >
+                {{ p.product }}
+                <a-tag :color="p.built_in ? 'blue' : 'purple'" size="small">
+                  {{ p.keyword_count }} 词
+                </a-tag>
+              </a-checkbox>
+              <a-space v-if="!p.built_in" :size="2">
+                <a-button type="link" size="small" :disabled="running" @click="openProductModal(p)">
+                  编辑
+                </a-button>
+                <a-popconfirm
+                  title="确定删除这个自定义产品吗？"
+                  ok-text="删除"
+                  cancel-text="取消"
+                  @confirm="removeProduct(p)"
+                >
+                  <a-button type="link" danger size="small" :disabled="running">删除</a-button>
+                </a-popconfirm>
+              </a-space>
+            </div>
+            <a-button type="dashed" size="small" :disabled="running" @click="openProductModal()">
+              <plus-outlined /> 自定义产品
+            </a-button>
+          </div>
           <div style="color: #999; font-size: 12px; margin-top: 4px">
-            可不选产品，只用下方自定义关键词
+            自定义产品会持久保存，可编辑名称和专属关键词；也可不选产品，只用下方临时关键词。
           </div>
         </a-form-item>
 
@@ -72,6 +92,37 @@
         </a-form-item>
       </a-form>
     </a-card>
+
+    <a-modal
+      v-model:open="showProductModal"
+      :title="editingProduct ? '编辑自定义产品' : '新增自定义产品'"
+      :confirm-loading="savingProduct"
+      ok-text="保存"
+      cancel-text="取消"
+      @ok="saveProduct"
+    >
+      <a-form layout="vertical">
+        <a-form-item label="产品名称" required>
+          <a-input
+            v-model:value="productForm.name"
+            :maxlength="50"
+            :disabled="savingProduct"
+            placeholder="例：新产品名称"
+          />
+        </a-form-item>
+        <a-form-item label="产品关键词" required>
+          <a-textarea
+            v-model:value="productForm.keywordsText"
+            :rows="8"
+            :disabled="savingProduct"
+            placeholder="一行一个关键词，最多 100 个&#10;例：&#10;AI presentation maker&#10;presentation design tutorial"
+          />
+          <div style="color: #999; font-size: 12px; margin-top: 4px">
+            {{ productFormKeywords.length }} 个有效关键词。保存后会显示在产品选择区。
+          </div>
+        </a-form-item>
+      </a-form>
+    </a-modal>
 
     <a-card v-if="running || progress.status === 'done' || progress.status === 'failed'" title="任务进度" style="margin-bottom: 16px">
       <a-alert
@@ -157,6 +208,7 @@ import { message as antMessage } from 'ant-design-vue'
 import {
   ThunderboltOutlined,
   InfoCircleOutlined,
+  PlusOutlined,
 } from '@ant-design/icons-vue'
 import { crawlerApi } from '../api'
 
@@ -166,19 +218,30 @@ const customQueriesText = ref('')
 const enableEnrich = ref(true)
 const enableEmail = ref(true)
 const enableDeepEmail = ref(false)
+const showProductModal = ref(false)
+const savingProduct = ref(false)
+const editingProduct = ref(null)
+const productForm = ref({ name: '', keywordsText: '' })
 
-// 把多行文本解析成有效关键词数组（去空白/空行/去重）
-const customQueries = computed(() => {
+function parseLines(text, maxLength = 200, maxItems = 100) {
   const seen = new Set()
   const out = []
-  for (const line of customQueriesText.value.split('\n')) {
-    const q = line.trim()
-    if (q && q.length <= 200 && !seen.has(q)) {
-      seen.add(q)
-      out.push(q)
+  for (const line of text.split('\n')) {
+    const value = line.trim()
+    if (value && value.length <= maxLength && !seen.has(value)) {
+      seen.add(value)
+      out.push(value)
+      if (out.length >= maxItems) break
     }
   }
   return out
+}
+
+const productFormKeywords = computed(() => parseLines(productForm.value.keywordsText))
+
+// 把多行文本解析成有效关键词数组（去空白/空行/去重）
+const customQueries = computed(() => {
+  return parseLines(customQueriesText.value, 200, 500)
 })
 
 const running = ref(false)
@@ -203,6 +266,65 @@ async function loadProducts() {
     products.value = await crawlerApi.products()
   } catch (e) {
     antMessage.error('加载产品列表失败')
+  }
+}
+
+function toggleProduct(name, checked) {
+  if (checked) {
+    if (!selectedProducts.value.includes(name)) selectedProducts.value.push(name)
+  } else {
+    selectedProducts.value = selectedProducts.value.filter(item => item !== name)
+  }
+}
+
+function openProductModal(product = null) {
+  editingProduct.value = product
+  productForm.value = product
+    ? { name: product.product, keywordsText: (product.keywords || []).join('\n') }
+    : { name: '', keywordsText: '' }
+  showProductModal.value = true
+}
+
+async function saveProduct() {
+  const name = productForm.value.name.trim()
+  const keywords = productFormKeywords.value
+  if (!name) {
+    antMessage.warning('请输入产品名称')
+    return
+  }
+  if (!keywords.length) {
+    antMessage.warning('至少输入一个有效关键词')
+    return
+  }
+  savingProduct.value = true
+  try {
+    const previousName = editingProduct.value?.product
+    const saved = editingProduct.value
+      ? await crawlerApi.updateProduct(editingProduct.value.id, name, keywords)
+      : await crawlerApi.createProduct(name, keywords)
+    if (previousName && selectedProducts.value.includes(previousName)) {
+      selectedProducts.value = selectedProducts.value
+        .filter(item => item !== previousName)
+        .concat(saved.product)
+    }
+    showProductModal.value = false
+    await loadProducts()
+    antMessage.success(editingProduct.value ? '自定义产品已更新' : '自定义产品已保存')
+  } catch (e) {
+    antMessage.error(e.response?.data?.detail || '保存自定义产品失败')
+  } finally {
+    savingProduct.value = false
+  }
+}
+
+async function removeProduct(product) {
+  try {
+    await crawlerApi.deleteProduct(product.id)
+    selectedProducts.value = selectedProducts.value.filter(item => item !== product.product)
+    await loadProducts()
+    antMessage.success('自定义产品已删除')
+  } catch (e) {
+    antMessage.error(e.response?.data?.detail || '删除自定义产品失败')
   }
 }
 
@@ -285,5 +407,17 @@ onBeforeUnmount(() => {
 <style scoped>
 .crawler-page {
   max-width: 960px;
+}
+
+.product-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+}
+
+.product-item {
+  display: inline-flex;
+  align-items: center;
 }
 </style>
