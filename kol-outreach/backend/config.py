@@ -25,7 +25,7 @@ class Settings:
     APP_VERSION: str = "0.1.0"
     DEBUG: bool = os.getenv("DEBUG", "true").lower() == "true"
     HOST: str = os.getenv("HOST", "0.0.0.0")
-    PORT: int = int(os.getenv("PORT", "8000"))
+    PORT: int = int(os.getenv("PORT") or "8000")
     LOG_FILE: str = os.getenv("LOG_FILE", "./logs/kol-outreach.log")
 
     # ===== 数据库 =====
@@ -67,7 +67,7 @@ class Settings:
     # Polling complements webhooks and repairs missed events. Snov itself may
     # detect mailbox replies less frequently than this polling interval.
     SNOV_SYNC_INTERVAL_SECONDS: int = max(
-        60, int(os.getenv("SNOV_SYNC_INTERVAL_SECONDS", "120"))
+        60, int(os.getenv("SNOV_SYNC_INTERVAL_SECONDS") or "120")
     )
 
     # ===== IMAP 附件同步（直连 Gmail 抓真附件，绕开 Snov）=====
@@ -76,13 +76,13 @@ class Settings:
     # 定时轮询（每 10 分钟）查未读邮件；前端手动触发可指定时间范围。
     IMAP_SYNC_ENABLED: bool = os.getenv("IMAP_SYNC_ENABLED", "true").lower() == "true"
     IMAP_SYNC_INTERVAL_SECONDS: int = max(
-        60, int(os.getenv("IMAP_SYNC_INTERVAL_SECONDS", "600"))
+        60, int(os.getenv("IMAP_SYNC_INTERVAL_SECONDS") or "600")
     )
     # SOCKS5 代理（Clash 等）。国内直连 imap.gmail.com 会被墙，必须走代理。
     # 127.0.0.1:7897 是 Clash Verge 默认 mixed 端口。
     IMAP_PROXY_ENABLED: bool = os.getenv("IMAP_PROXY_ENABLED", "true").lower() == "true"
     IMAP_PROXY_HOST: str = os.getenv("IMAP_PROXY_HOST", "127.0.0.1")
-    IMAP_PROXY_PORT: int = int(os.getenv("IMAP_PROXY_PORT", "7897"))
+    IMAP_PROXY_PORT: int = int(os.getenv("IMAP_PROXY_PORT") or "7897")
     # 附件本地存储目录（相对 backend/ 工作目录）
     ATTACHMENT_STORAGE_DIR: str = os.getenv("ATTACHMENT_STORAGE_DIR", "./data/attachments")
     # 邮箱应用专用密码的 Fernet 主密钥（base64 urlsafe，32 字节）。
@@ -91,17 +91,17 @@ class Settings:
     ATTACHMENT_MASTER_KEY: str = os.getenv("ATTACHMENT_MASTER_KEY", "")
 
     # ===== 发信约束(防封安全阀) =====
-    MAX_DAILY_SEND_PER_MAILBOX: int = int(os.getenv("MAX_DAILY_SEND_PER_MAILBOX", "30"))
-    WARMUP_MIN_DAYS: int = int(os.getenv("WARMUP_MIN_DAYS", "14"))
+    MAX_DAILY_SEND_PER_MAILBOX: int = int(os.getenv("MAX_DAILY_SEND_PER_MAILBOX") or "30")
+    WARMUP_MIN_DAYS: int = int(os.getenv("WARMUP_MIN_DAYS") or "14")
 
     # ===== 采集器（KOL 爬虫，内嵌于 services/crawler/）=====
     # 关键词发现 / 频道 about 抓取 / MX 校验三阶段的并发上限
-    CRAWLER_MAX_CONCURRENCY_DISCOVERY: int = int(os.getenv("CRAWLER_MAX_CONCURRENCY_DISCOVERY", "3"))
-    CRAWLER_MAX_CONCURRENCY_CHANNEL: int = int(os.getenv("CRAWLER_MAX_CONCURRENCY_CHANNEL", "6"))
-    CRAWLER_MAX_CONCURRENCY_MX: int = int(os.getenv("CRAWLER_MAX_CONCURRENCY_MX", "30"))
+    CRAWLER_MAX_CONCURRENCY_DISCOVERY: int = int(os.getenv("CRAWLER_MAX_CONCURRENCY_DISCOVERY") or "3")
+    CRAWLER_MAX_CONCURRENCY_CHANNEL: int = int(os.getenv("CRAWLER_MAX_CONCURRENCY_CHANNEL") or "6")
+    CRAWLER_MAX_CONCURRENCY_MX: int = int(os.getenv("CRAWLER_MAX_CONCURRENCY_MX") or "30")
     # 单页抓取超时（秒）与请求间隔（秒，礼貌限速）
-    CRAWLER_REQUEST_TIMEOUT: int = int(os.getenv("CRAWLER_REQUEST_TIMEOUT", "20"))
-    CRAWLER_REQUEST_INTERVAL: float = float(os.getenv("CRAWLER_REQUEST_INTERVAL", "0.2"))
+    CRAWLER_REQUEST_TIMEOUT: int = int(os.getenv("CRAWLER_REQUEST_TIMEOUT") or "20")
+    CRAWLER_REQUEST_INTERVAL: float = float(os.getenv("CRAWLER_REQUEST_INTERVAL") or "0.2")
     # User-Agent（与外部邮件平台抓取保持一致风格）
     CRAWLER_USER_AGENT: str = os.getenv(
         "CRAWLER_USER_AGENT",
