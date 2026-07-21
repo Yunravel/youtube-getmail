@@ -28,7 +28,14 @@ services:
 
   # ===== 中台后端 =====
   backend:
-    build: ./backend
+    # 走 build context + args 模式,把 .env.prod 里的 GIT_SHA 注入到镜像
+    # .env.prod 里建议填: GIT_SHA=$(git rev-parse HEAD)
+    # 不传时 build arg 落到 Dockerfile 的 default "unknown"
+    build:
+      context: ./backend
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    image: kol-outreach-backend:${GIT_TAG:-latest}  # 显式打 tag,旧镜像不会被覆盖(部署可回滚)
     container_name: kol-backend
     restart: unless-stopped
     depends_on:

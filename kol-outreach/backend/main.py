@@ -44,10 +44,30 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+def _read_git_sha() -> str:
+    """读取构建时注入的 commit SHA。
+
+    设计原则:这个函数**绝不能**让应用启动失败 —— 文件不存在或权限不足
+    时必须降级,不能阻塞启动。所以:
+      1) 优先读 /app/GIT_SHA(容器内 build 阶段写入)
+      2) 失败降级 "unknown"
+      3) 整个调用被 try/except 包裹,任何 OSError 都吞掉
+    """
+    try:
+        return Path("/app/GIT_SHA").read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期:启动时建表"""
-    logger.info(f"🚀 启动 {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(
+        "🚀 启动 %s v%s @ %s",
+        settings.APP_NAME,
+        settings.APP_VERSION,
+        _read_git_sha(),
+    )
     init_db()
     logger.info("✅ 数据库表已就绪")
     start_snov_scheduler()
