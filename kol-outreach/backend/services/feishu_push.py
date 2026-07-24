@@ -559,28 +559,24 @@ def _split_tags(value: Any) -> list[str]:
 
 
 def _creator_tags(kol: Kol, messages: list[Message], platform: str) -> str:
-    candidates: list[str] = []
-    for message in sorted(
-        messages,
-        key=lambda item: item.received_at or datetime.min,
-        reverse=True,
-    ):
-        analysis = message.ai_analysis or {}
-        for key in ("creator_tags", "creator_niche", "content_focus"):
-            candidates.extend(_split_tags(analysis.get(key)))
-    candidates.extend(_split_tags(kol.niche))
-    candidates.extend(_split_tags(kol.content_category))
-    if platform and platform != PLACEHOLDERS["platform"]:
-        candidates.append(f"{platform}创作者")
-    candidates.extend(("内容创作者", "数字内容", "品牌合作达人"))
+    """生成 2–3 个固定枚举达人标签（DATABASE_DEVELOPMENT.md §5.4）。
 
-    unique: list[str] = []
-    for tag in candidates:
-        if tag.lower() not in {item.lower() for item in unique}:
-            unique.append(tag)
-        if len(unique) == 3:
-            break
-    return "、".join(unique[:3])
+    从客观数据派生：赛道(kol.niche，已归一) + 平台 + 粉丝量级/语言。
+    不再用 AI 自由文本（creator_niche/content_focus）和硬编码凑数标签
+    （内容创作者/数字内容/品牌合作达人），确保标签可控、稳定、有统一范围。
+    messages 参数保留以兼容调用方签名，当前不再使用。
+    """
+    from services.creator_tag import build_creator_tags
+    from services.niche_normalize import normalize_niche_for_storage
+
+    # niche 优先，为空回退 content_category；都过一遍归一确保是规范赛道枚举。
+    niche = normalize_niche_for_storage(kol.niche) or normalize_niche_for_storage(kol.content_category)
+    return build_creator_tags(
+        niche=niche,
+        platform=platform or kol.platform,
+        followers=kol.subscribers or kol.followers,
+        language=kol.language,
+    )
 
 
 def _complete_quote(messages: list[Message]) -> Optional[str]:
