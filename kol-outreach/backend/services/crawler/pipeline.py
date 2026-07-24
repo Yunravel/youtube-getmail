@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from db import SessionLocal
+from services.country_normalize import normalize_country_for_storage
 from services.crawler import enrich, normalize, youtube
 from services.crawler.config_rules import (
     allowedByProduct,
@@ -210,7 +211,7 @@ def _build_scrapecreators_row(
         contact_email=client.extract_email(profile, platform),
         email_is_business=False,  # ScrapeCreators 不区分商务/个人邮箱
         email_source_url=client.extract_profile_url(profile, platform),
-        country=country,
+        country=normalize_country_for_storage(country),
         country_confidence="ScrapeCreators",
         followers=client.extract_followers(profile, platform),
         avg_views=client.extract_avg_views(profile, platform),
@@ -374,7 +375,7 @@ async def _enrich_and_collect_emails(
                 contact_email=email_info["email"] if email_info else None,
                 email_is_business=email_info["is_business"] if email_info else False,
                 email_source_url=email_info["source_url"] if email_info else None,
-                country=country,
+                country=normalize_country_for_storage(country),
                 country_confidence=country_confidence,
                 followers=followers,
                 language="en",
@@ -404,7 +405,7 @@ async def _enrich_and_collect_emails(
                 account=social["handle"],
                 profile_url=social["profile_url"],
                 contact_email=None,
-                country=country,
+                country=normalize_country_for_storage(country),
                 country_confidence=country_confidence,
                 fit_products=qualified,
                 recommend_product=qualified[0] if qualified else None,

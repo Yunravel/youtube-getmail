@@ -8,6 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from models import Kol
+from services.country_normalize import normalize_country_for_storage
 from services.email_utils import ensure_kol_email, normalize_email
 
 
@@ -118,7 +119,9 @@ def _mapped_fields(prospect: dict, list_id: str, list_name: str) -> dict[str, An
         "full_name": full_name,
         "first_name": first_name,
         "last_name": last_name,
-        "country": _text(_first(prospect, "country", "countryName", "country_name")),
+        "country": normalize_country_for_storage(
+            _text(_first(prospect, "country", "countryName", "country_name"))
+        ),
         "locality": _text(_first(prospect, "locality", "city")),
         "position": _text(_first(prospect, "position", "jobTitle", "job_title")),
         "company_name": _text(_first(prospect, "companyName", "company_name", "company")),

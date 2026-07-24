@@ -103,11 +103,35 @@ _INVALID_VALUES = {"/", "unknown", "unknown ", "latent spaces", ""}
 
 
 def canonical_country(raw: str | None) -> str | None:
-    """把国家别名归一到规范名。未命中映射的原样返回（去首尾空白）。无效值返回 None。"""
+    """把国家别名归一到规范名。未命中映射的原样返回（去首尾空白）。无效值返回 None。
+
+    用于查询/展示层（筛选项归一）。入库请用 :func:`normalize_country_for_storage`。
+    """
     if raw is None:
         return None
     key = raw.strip().lower()
     if not key or key in _INVALID_VALUES:
+        return None
+    return _CANONICAL_MAP.get(key, raw.strip())
+
+
+# 入库时视为"未知"的占位符（归一为 None，不写进 DB）。
+_STORAGE_PLACEHOLDERS = _INVALID_VALUES | {"unknown", "n/a", "na", "none", "null", "-"}
+
+
+def normalize_country_for_storage(raw: str | None) -> str | None:
+    """入库归一入口：所有写入 kol.country 的路径都应经过它。
+
+    - 已知别名（United States/USA/美国 等）→ 规范中文名（"美国"）。
+    - 占位符（/、Unknown、N/A、- 等）→ None（未知值用 NULL，规范 §1.4）。
+    - 未命中映射但看起来合法的国家名 → 原样保留（不丢数据，待映射表补充）。
+
+    这样 DB 里的 country 字段就是统一的规范名，查询层无需再做别名展开。
+    """
+    if raw is None:
+        return None
+    key = raw.strip().lower()
+    if not key or key in _STORAGE_PLACEHOLDERS:
         return None
     return _CANONICAL_MAP.get(key, raw.strip())
 

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from db import get_db
 from models import Kol
-from services.country_normalize import aliases_of, canonical_country
+from services.country_normalize import normalize_country_for_storage
 from services.email_utils import ensure_kol_email
 
 router = APIRouter()
@@ -81,8 +81,9 @@ def list_kols(
     """KOL 列表(分页 + 筛选)。
 
     筛选维度：status / niche / country / 粉丝数区间(min_followers, max_followers)。
-    niche 为子串模糊匹配；country 走国家归一（"美国" 命中 United States/美国 等全部
-    别名）。粉数以 subscribers 为准（与列表展示口径一致）。
+    niche 与 country 均为子串模糊匹配。country 已在入库时归一为规范名
+    （见 services/country_normalize.normalize_country_for_storage），无需查询层再展开别名。
+    粉数以 subscribers 为准（与列表展示口径一致）。
     返回 ``{items, total}``，total 为精确总数，供前端分页。
     """
     q = db.query(Kol)
@@ -91,16 +92,7 @@ def list_kols(
     if niche:
         q = q.filter(Kol.niche.ilike(f"%{niche}%"))
     if country:
-        # 国家归一筛选：把用户选的规范名展开为所有别名，OR 匹配。
-        # 例如选"美国" → country ilike '%United States%' OR ilike '%美国%'。
-        aliases = aliases_of(country)
-        if aliases:
-            from sqlalchemy import or_
-            conds = [Kol.country.ilike(f"%{a}%") for a in aliases]
-            q = q.filter(or_(*conds))
-        else:
-            # 未命中归一表，退化为子串模糊（保底，不丢数据）
-            q = q.filter(Kol.country.ilike(f"%{country}%"))
+        q = q.filter(Kol.country.ilike(f"%{country}%"))
     if min_followers is not None:
         q = q.filter(Kol.subscribers >= min_followers)
     if max_followers is not None:
@@ -112,26 +104,21 @@ def list_kols(
 
 @router.get("/filters/options")
 def kol_filter_options(db: Session = Depends(get_db)):
-    """KOL 列表筛选项的可选值（国家归一列表 + 赛道列表，供前端下拉）。
+    """KOL 列表筛选项的可选值（国家列表 + 赛道列表，供前端下拉）。
 
-    - countries：把 country 字段中英文混杂的别名归一到规范名（"美国" 合并
-      United States/美国 等），按归一后计数降序，过滤脏值。
-    - niches：niche 字段去重，按频次降序，过滤脏值。
+    country 已在入库时归一为规范名（无中英文混杂），这里直接去重按频次降序。
+    niche 同样去重按频次降序，过滤脏值。
     """
-    # 国家归一：逐行 canonical，按规范名聚合计数
-    raw_countries = (
-        db.query(Kol.country)
+    # 国家：已归一，直接去重 + 频次降序
+    country_rows = (
+        db.query(Kol.country, func.count(Kol.id))
         .filter(Kol.country.isnot(None))
         .filter(Kol.country != "")
+        .group_by(Kol.country)
+        .order_by(func.count(Kol.id).desc())
         .all()
     )
-    canon_counts: dict[str, int] = {}
-    for (raw,) in raw_countries:
-        canon = canonical_country(raw)
-        if canon is None:
-            continue  # 脏值跳过
-        canon_counts[canon] = canon_counts.get(canon, 0) + 1
-    countries = sorted(canon_counts, key=lambda k: canon_counts[k], reverse=True)
+    countries = [r[0] for r in country_rows]
 
     # 赛道：去重 + 频次降序，过滤脏值
     niche_rows = (
@@ -222,7 +209,7 @@ async def import_csv(
             channel_url=row.get("channel_url", "").strip() or None,
             email=email,
             subscribers=subscribers,
-            country=row.get("country", "").strip() or None,
+            country=normalize_country_for_storage(row.get("country", "")),
             niche=row.get("niche", "").strip() or None,
             recent_videos=recent_videos,
             full_name=name,

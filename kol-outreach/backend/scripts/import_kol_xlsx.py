@@ -16,6 +16,7 @@ from sqlalchemy import func
 
 from db import SessionLocal
 from models import Kol, KolEmail, ProjectAssessment
+from services.country_normalize import normalize_country_for_storage
 from services.email_utils import normalize_email
 
 
@@ -304,7 +305,7 @@ def classify_and_merge(cleaned: list[dict[str, Any]], commit: bool) -> dict[str,
                         channel_url=item["profile_url"] or None, profile_url=item["profile_url"] or None,
                         platform=item["platform"] or None, social_handle=item["social_handle"] or None,
                         followers=item["followers"], subscribers=item["followers"],
-                        country=item["country"] or None, priority=item["priority"] or None,
+                        country=normalize_country_for_storage(item["country"]), priority=item["priority"] or None,
                         content_category=item["content_category"] or None,
                         niche=item["content_category"] or None, company_site=item["company_site"] or None,
                         recent_videos=item["recent_videos"] or None, source=item["source"],
