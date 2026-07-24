@@ -19,11 +19,15 @@
         <a-select-option value="in_conversation">对话中</a-select-option>
         <a-select-option value="closed">已结束</a-select-option>
       </a-select>
-      <a-input
+      <a-select
         v-model:value="filters.niche"
-        style="width: 150px"
+        style="width: 160px"
         placeholder="赛道"
         allow-clear
+        show-search
+        :options="nicheOptions"
+        :field-names="{ label: 'value', value: 'value' }"
+        :filter-option="(input, option) => option.value.toLowerCase().includes(input.toLowerCase())"
         @change="applyFilter"
       />
       <a-select
@@ -227,6 +231,7 @@ const filters = reactive({
   maxFollowers: undefined,
 })
 const countryOptions = ref([])
+const nicheOptions = ref([])
 const selectedIds = ref([])
 const showGenerateModal = ref(false)
 const generating = ref(false)
@@ -266,13 +271,15 @@ async function load() {
   }
 }
 
-async function loadCountryOptions() {
+async function loadFilterOptions() {
   try {
     const res = await kolApi.filterOptions()
     countryOptions.value = (res.countries || []).map(c => ({ value: c, label: c }))
+    nicheOptions.value = (res.niches || []).map(n => ({ value: n, label: n }))
   } catch (e) {
-    // 国家选项加载失败不阻塞列表展示
+    // 筛选选项加载失败不阻塞列表展示
     countryOptions.value = []
+    nicheOptions.value = []
   }
 }
 
@@ -377,7 +384,7 @@ function statusLabel(s) {
 }
 
 onMounted(async () => {
-  loadCountryOptions()
+  loadFilterOptions()
   await load()
   refreshTimer = window.setInterval(load, 120000)
 })
