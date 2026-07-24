@@ -1,7 +1,7 @@
 """Snov 集成管理接口（受看板登录保护）。"""
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,8 +9,9 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from db import get_db
+from db import SessionLocal, get_db
 from models import Kol, Message, Thread
+from config import settings
 from services.ai_intent import analyze_intent, intent_to_thread_status
 from services.attachments import extract_attachments, extract_links_from_text, merge_attachments
 from services.email_content import clean_email_body, is_html_email_body
@@ -26,7 +27,7 @@ def _client_or_502():
     try:
         return get_snov_client()
     except Exception as exc:
-        raise HTTPException(502, f"Snov client 初始化失败: {exc}")
+        raise HTTPException(502, f"营销平台客户端初始化失败: {exc}")
 
 
 @router.get("/status")
@@ -40,7 +41,7 @@ def snov_status():
             "webhook_count": len(client.list_webhooks()),
         }
     except Exception as exc:
-        raise HTTPException(502, f"Snov API 连接失败: {exc}")
+        raise HTTPException(502, f"营销平台连接失败: {exc}")
 
 
 @router.get("/campaigns")
@@ -57,7 +58,7 @@ def list_campaigns():
             for item in campaigns
         ]
     except Exception as exc:
-        raise HTTPException(502, f"获取 Snov Campaign 失败: {exc}")
+        raise HTTPException(502, f"获取营销活动失败: {exc}")
 
 
 @router.get("/webhooks")
@@ -65,7 +66,7 @@ def list_webhooks():
     try:
         return get_snov_client().list_webhooks()
     except Exception as exc:
-        raise HTTPException(502, f"获取 Snov webhook 失败: {exc}")
+        raise HTTPException(502, f"获取营销平台通知配置失败: {exc}")
 
 
 @router.post("/sync-contacts")
@@ -74,7 +75,7 @@ def sync_contacts(db: Session = Depends(get_db)):
     try:
         return sync_snov_contacts(db, get_snov_client())
     except Exception as exc:
-        raise HTTPException(502, f"同步 Snov 联系人失败: {exc}")
+        raise HTTPException(502, f"同步营销平台联系人失败: {exc}")
 
 
 class CreateProspectListFromKolsIn(BaseModel):
@@ -104,7 +105,7 @@ def create_prospect_list_from_kols(
             kol_ids=body.kol_ids,
         )
     except SnovListCreateError as exc:
-        raise HTTPException(502, f"创建 Snov 待发送名单失败: {exc}")
+        raise HTTPException(502, f"创建待发送名单失败: {exc}")
 
 
 class CreateWebhookIn(BaseModel):
@@ -143,7 +144,7 @@ def create_webhook(body: CreateWebhookIn):
         )
         return {"status": "created", "webhook": hook}
     except Exception as exc:
-        raise HTTPException(502, f"创建 Snov webhook 失败: {exc}")
+        raise HTTPException(502, f"创建营销平台通知配置失败: {exc}")
 
 
 def _text(value: Any) -> str:
@@ -186,14 +187,54 @@ def _attach_campaign(thread: Thread, campaign_id: str, campaign_name: str) -> No
             thread.campaign_name = campaign_name
 
 
+def _enqueue_kol_enrich(kol_ids: list[int]) -> None:
+    """把回信 KOL 的画像补全丢线程池异步跑（不阻塞 sync-replies 响应）。
+
+    单独成函数，便于测试 monkeypatch 为 no-op，避免后台线程访问已销毁的
+    内存测试库（no such table）。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from services.kol_enrich import enrich_reply_kol
+
+    pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="kol-enrich")
+    for kid in kol_ids:
+        pool.submit(enrich_reply_kol, kid)
+    pool.shutdown(wait=False)
+    logger.info("已排队 %d 个回信 KOL 的画像补全任务", len(kol_ids))
+
+
+def _enqueue_feishu_push(message_ids: list[int]) -> None:
+    """Persist Feishu tasks; the scheduler performs retryable delivery."""
+    from services.feishu_push import enqueue_messages_sync
+    from services.quote_source_analysis import analyze_and_save_quote_sources
+
+    # Historical sync starts profile enrichment in a separate worker.  A short
+    # due-time delay allows that enrichment to commit before delivery.
+    for message_id in message_ids:
+        analyze_and_save_quote_sources(message_id)
+    queued = enqueue_messages_sync(list(message_ids), delay_seconds=120)
+    logger.info("已持久化 %d 个飞书同步任务", queued)
+
+
 @router.post("/sync-replies")
 def sync_historical_replies(db: Session = Depends(get_db)):
-    """补拉 Snov Campaign 的历史回信；可安全重复执行，不会创建重复消息。"""
+    """补拉 Snov Campaign 的历史回信；可安全重复执行，不会创建重复消息。
+
+    三阶段设计（DATABASE_DEVELOPMENT.md §8，外部 API 不在 DB 事务内）：
+      阶段 1：Snov HTTP 拉取全部回信到内存（不碰 db，session 不持有事务/连接）
+      阶段 2：单事务落库（查重→建 KOL/Thread/Message→supersede），commit
+      阶段 3：commit 后用独立 session 批量跑 analyze_intent 补写 AI 结果
+    AI 分析失败不影响回信入库（回信是业务核心，AI 是增强）。
+    """
+    # ==================== 阶段 1：Snov 拉取（纯 HTTP，不用 db）====================
+    # 注意：Depends(get_db) 的 session 对象此刻已开，但在执行首条 SQL 前不会
+    # 借连接/开事务（SQLAlchemy 惰性连接）。本阶段不调用任何 db 方法，故 Snov
+    # HTTP 期间无未提交事务、无锁。
     try:
         client = get_snov_client()
         campaigns = client.list_campaigns()
     except Exception as exc:
-        raise HTTPException(502, f"获取 Snov Campaign 失败: {exc}")
+        raise HTTPException(502, f"获取营销活动失败: {exc}")
 
     result = {
         "campaigns": len(campaigns),
@@ -205,29 +246,36 @@ def sync_historical_replies(db: Session = Depends(get_db)):
         "errors": [],
     }
 
+    # 把所有 campaign 的回信一次性拉到内存，供阶段 2 落库。
+    reply_batches: list[tuple[str, str, list]] = []
+    for campaign in campaigns:
+        campaign_id = _text(campaign.get("id") or campaign.get("hash"))
+        campaign_name = _text(
+            (campaign.get("campaign") or {}).get("name")
+            if isinstance(campaign.get("campaign"), dict)
+            else campaign.get("campaign")
+        )
+        if not campaign_id:
+            result["skipped"] += 1
+            continue
+        try:
+            payload = client.get_campaign_replies(campaign_id)
+        except Exception as exc:
+            result["errors"].append({"campaign_id": campaign_id, "error": str(exc)})
+            continue
+        records = payload.get("data", payload) if isinstance(payload, dict) else payload
+        if not isinstance(records, list):
+            result["errors"].append({"campaign_id": campaign_id, "error": "Snov 返回格式异常"})
+            continue
+        reply_batches.append((campaign_id, campaign_name, records))
+
+    # ==================== 阶段 2：落库（首次 SQL 触发事务，无 AI）====================
+    created_message_ids: list[int] = []
+    created_kol_ids: list[int] = []
+    analysis_jobs: list[dict] = []  # 收集待 AI 分析任务，commit 前把 ORM 属性读出来
+
     try:
-        for campaign in campaigns:
-            campaign_id = _text(campaign.get("id") or campaign.get("hash"))
-            campaign_name = _text(
-                (campaign.get("campaign") or {}).get("name")
-                if isinstance(campaign.get("campaign"), dict)
-                else campaign.get("campaign")
-            )
-            if not campaign_id:
-                result["skipped"] += 1
-                continue
-
-            try:
-                payload = client.get_campaign_replies(campaign_id)
-            except Exception as exc:
-                result["errors"].append({"campaign_id": campaign_id, "error": str(exc)})
-                continue
-
-            records = payload.get("data", payload) if isinstance(payload, dict) else payload
-            if not isinstance(records, list):
-                result["errors"].append({"campaign_id": campaign_id, "error": "Snov 返回格式异常"})
-                continue
-
+        for campaign_id, campaign_name, records in reply_batches:
             for record in records:
                 if not isinstance(record, dict):
                     result["skipped"] += 1
@@ -271,7 +319,7 @@ def sync_historical_replies(db: Session = Depends(get_db)):
                         reply.get("subject")
                         or reply.get("emailSubject")
                         or reply.get("email_subject")
-                    ) or "Snov 历史回信"
+                    ) or "历史回信"
                     raw_body = _text(
                         reply.get("message")
                         or reply.get("body")
@@ -280,7 +328,7 @@ def sync_historical_replies(db: Session = Depends(get_db)):
                         or reply.get("emailBody")
                         or reply.get("email_body")
                     )
-                    body = clean_email_body(raw_body) or "[Snov 历史回信；正文为空]"
+                    body = clean_email_body(raw_body) or "[历史回信；正文为空]"
                     received_value = (
                         reply.get("receivedAt")
                         or reply.get("received_at")
@@ -319,7 +367,7 @@ def sync_historical_replies(db: Session = Depends(get_db)):
                                 & (Message.body_text == body)
                                 & (Message.received_at == received_at)
                             ),
-                        )
+                        ),
                     ).first()
                     if existing_message:
                         if attachments and not existing_message.attachments:
@@ -338,6 +386,7 @@ def sync_historical_replies(db: Session = Depends(get_db)):
                         db.add(kol)
                         db.flush()
                         result["created_kols"] += 1
+                        created_kol_ids.append(kol.id)
 
                     thread_query = db.query(Thread).filter(
                         Thread.kol_id == kol.id,
@@ -380,34 +429,131 @@ def sync_historical_replies(db: Session = Depends(get_db)):
                         received_at=received_at,
                     )
                     db.add(message)
+                    db.flush()
+                    created_message_ids.append(message.id)
+                    from services.auto_reply import supersede_thread_tasks
+                    supersede_thread_tasks(db, thread.id, message.id)
                     thread.reply_count = (thread.reply_count or 0) + 1
                     kol.status = "in_conversation"
 
-                    analysis = analyze_intent(body, kol_name=kol.name, subject=subject)
-                    if analysis:
-                        message.ai_analysis = analysis
-                        thread.last_intent = analysis.get("intent")
-                        thread.intent_score = analysis.get("intent_score", 0)
-                        thread.ai_summary = analysis.get("summary")
-                        next_status = intent_to_thread_status(analysis)
-                        if next_status:
-                            thread.status = next_status
+                    # 收集待分析任务：在 commit 前（session 活跃）把 ORM 属性读出来，
+                    # 阶段 3 会用独立 session 写 AI 结果，届时这些 ORM 对象已 detach。
+                    analysis_jobs.append({
+                        "message_id": message.id,
+                        "thread_id": thread.id,
+                        "body": body,
+                        "kol_name": kol.name,
+                        "subject": subject,
+                    })
                     result["created_messages"] += 1
 
         db.commit()
-        logger.info(
-            "Snov sync complete: campaigns=%s created_kols=%s created_threads=%s "
-            "created_messages=%s duplicates=%s skipped=%s errors=%s",
-            result["campaigns"],
-            result["created_kols"],
-            result["created_threads"],
-            result["created_messages"],
-            result["duplicates"],
-            result["skipped"],
-            len(result["errors"]),
-        )
     except Exception:
         db.rollback()
         raise
 
+    # ==================== 阶段 3：AI 分析（commit 后，独立 session）====================
+    # analyze_intent 内部自管 DeepSeek/OpenAI HTTP，完全脱离 DB session。
+    # 用独立短事务写结果；AI 失败只丢分析，不影响已 commit 的回信。
+    _run_intent_analysis(analysis_jobs)
+
+    # ==================== 阶段 4：后处理（自管 session，在 commit 后）====================
+    from services.auto_reply import evaluate_message_for_auto_reply
+    for created_message_id in created_message_ids:
+        evaluate_message_for_auto_reply(created_message_id)
+    # 新建的回信 KOL 无频道画像，丢线程池异步补全（不阻塞本响应）。
+    # 抽到模块级函数，便于测试置空避免跨线程访问已销毁的测试库。
+    if created_kol_ids:
+        _enqueue_kol_enrich(created_kol_ids)
+    # 每条新回信推送到飞书多维表格（未配置时内部静默跳过）。
+    if created_message_ids:
+        _enqueue_feishu_push(created_message_ids)
+    logger.info(
+        "Snov sync complete: campaigns=%s created_kols=%s created_threads=%s "
+        "created_messages=%s duplicates=%s skipped=%s errors=%s",
+        result["campaigns"],
+        result["created_kols"],
+        result["created_threads"],
+        result["created_messages"],
+        result["duplicates"],
+        result["skipped"],
+        len(result["errors"]),
+    )
+
     return result
+
+
+def _run_intent_analysis(jobs: list[dict]) -> None:
+    """批量对新建回信跑意向分析并写回 message/thread（独立短事务，在落库 commit 后）。
+
+    遵循 §8：analyze_intent 的外部 LLM HTTP 不在任何 DB session 内。失败不抛出，
+    仅记录日志——回信已入库，AI 结果缺失不影响主流程，下次重跑可补。
+    """
+    if not jobs:
+        return
+    db = SessionLocal()
+    try:
+        for job in jobs:
+            analysis = analyze_intent(
+                job["body"], kol_name=job["kol_name"], subject=job["subject"]
+            )
+            if not analysis:
+                continue
+            message = db.get(Message, job["message_id"])
+            if not message:
+                continue  # 极端情况：回信在 commit 后被删
+            message.ai_analysis = analysis
+            thread = db.get(Thread, job["thread_id"])
+            if thread:
+                thread.last_intent = analysis.get("intent")
+                thread.intent_score = analysis.get("intent_score", 0)
+                thread.ai_summary = analysis.get("summary")
+                next_status = intent_to_thread_status(analysis)
+                if next_status:
+                    thread.status = next_status
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Snov 同步的 AI 分析阶段失败（回信已入库，不影响主流程）")
+    finally:
+        db.close()
+
+
+class ReplayToFeishuIn(BaseModel):
+    """补推回信到飞书。支持按 message_id 列表，或按最近 N 天的回信。"""
+
+    message_ids: list[int] = Field(default_factory=list)
+    days: int = Field(default=0, ge=0, le=365, description="补推最近 N 天的回信（与 message_ids 二选一，默认 7 天）")
+
+
+@router.post("/replay-to-feishu")
+def replay_to_feishu(body: ReplayToFeishuIn, db: Session = Depends(get_db)):
+    """把库里已有的回信手动补推到飞书多维表格。
+
+    用途：第一次接入飞书时一次性灌入历史回信；或排查漏推时重试。
+    异步排队，立即返回排队数（不等待推送完成）。
+    """
+    if not settings.feishu_is_configured:
+        raise HTTPException(400, "飞书未配置（FEISHU_*），无法推送")
+
+    ids = list(body.message_ids)
+    if not ids and body.days == 0:
+        days = 7
+    else:
+        days = body.days
+    if not ids:
+        since = datetime.utcnow() - timedelta(days=days)
+        rows = (
+            db.query(Message.id)
+            .filter(Message.direction == "inbound")
+            .filter(Message.received_at >= since)
+            .all()
+        )
+        ids = [r[0] for r in rows]
+
+    if not ids:
+        return {"queued": 0}
+
+    from services.feishu_push import enqueue_messages_sync
+    queued = enqueue_messages_sync(ids)
+    return {"queued": queued}
