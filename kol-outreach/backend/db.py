@@ -12,16 +12,26 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 # SQLite 需要开 check_same_thread=False 才能在 FastAPI 多线程用
+_is_sqlite_url = settings.DATABASE_URL.startswith("sqlite")
 connect_args = {}
-if settings.DATABASE_URL.startswith("sqlite"):
+if _is_sqlite_url:
     connect_args = {"check_same_thread": False}
 
-engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args=connect_args,
-    echo=False,              # 调试时可开 True 打印 SQL
-    pool_pre_ping=True,
-)
+# 连接池参数仅对非 SQLite（PostgreSQL 等生产级库）生效。SQLite 走默认
+# SingletonThreadPool/NullPool，传 pool_size 等会引发警告或语义不符。
+_engine_kwargs: dict = {
+    "echo": False,           # 调试时可开 True 打印 SQL
+    "pool_pre_ping": True,   # 借出前 ping，避免用上被 PG 端/防火墙断开的死连接
+}
+if not _is_sqlite_url:
+    _engine_kwargs.update(
+        pool_size=10,        # 每进程常驻连接数（PG max_connections=100，留余量）
+        max_overflow=20,     # 突发可借额外连接（单容器上限 30）
+        pool_recycle=1800,   # 30min 回收，防长连接被服务端静默断开后僵死
+        pool_timeout=30,     # 池耗尽时等连接最多 30s，避免无限挂起
+    )
+
+engine = create_engine(settings.DATABASE_URL, connect_args=connect_args, **_engine_kwargs)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -40,7 +50,7 @@ def get_db():
 
 def _is_sqlite() -> bool:
     """当前 DATABASE_URL 是否指向 SQLite（本地开发库）。"""
-    return settings.DATABASE_URL.startswith("sqlite")
+    return _is_sqlite_url
 
 
 def init_db():

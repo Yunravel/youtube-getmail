@@ -12,14 +12,17 @@ from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from config import settings
-from db import SessionLocal
 
 logger = logging.getLogger(__name__)
 _scheduler: Optional[BackgroundScheduler] = None
 
 
 def _scheduled_crawl_job() -> None:
-    """定时触发的采集任务。按 CRAWLER_SCHEDULE_PRODUCTS 跑全量产品词表。"""
+    """定时触发的采集任务。按 CRAWLER_SCHEDULE_PRODUCTS 跑全量产品词表。
+
+    采集 I/O 期间不持有 DB session（DATABASE_DEVELOPMENT.md §8）；run_crawl 内部
+    在抓取完成后用独立短事务入库，故此处不传 db。
+    """
     products = [p.strip() for p in settings.CRAWLER_SCHEDULE_PRODUCTS.split(",") if p.strip()]
     if not products:
         logger.warning("定时采集跳过：CRAWLER_SCHEDULE_PRODUCTS 未配置")
@@ -27,14 +30,12 @@ def _scheduled_crawl_job() -> None:
 
     from services.crawler import run_crawl
 
-    db = SessionLocal()
     try:
         result = run_crawl(
             products,
             enable_enrich=True,
             enable_email=True,
             commit=True,
-            db=db,
         )
         logger.info(
             "定时采集完成: products=%s discovered=%s raw_rows=%s with_email=%s "
@@ -47,10 +48,7 @@ def _scheduled_crawl_job() -> None:
             result.get("kol_inserted", 0),
         )
     except Exception:
-        db.rollback()
         logger.exception("定时采集任务失败")
-    finally:
-        db.close()
 
 
 def start_crawler_scheduler() -> Optional[BackgroundScheduler]:

@@ -22,7 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config import settings
-from db import SessionLocal, get_db
+from db import get_db
 from models import CrawlerProduct
 from services.crawler.config_rules import productTerms
 
@@ -79,6 +79,7 @@ class CrawlIn(BaseModel):
     enable_enrich: bool = True       # 多平台外链扩展（IG/TikTok/X）
     enable_email: bool = True        # 公开邮箱采集 + MX 校验（YouTube about）
     enable_deep_email: bool = False  # 官网深度邮箱采集（需 Playwright + 代理，慢，默认关）
+    enable_scrape_creators: bool = False  # ScrapeCreators API 抓取（按 API 计费，默认关）
 
     @field_validator("products")
     @classmethod
@@ -118,6 +119,7 @@ def _run_crawl_job(
     custom_queries: list[str] | None = None,
     enable_deep_email: bool = False,
     custom_product_terms: dict[str, list[str]] | None = None,
+    enable_scrape_creators: bool = False,
 ) -> None:
     """后台任务函数：被 BackgroundTasks 调度，更新内存 job 状态。
 
@@ -133,8 +135,8 @@ def _run_crawl_job(
         job["total"] = total
         job["phase"] = phase
 
-    # 后台任务用独立 session；任务结束关闭
-    db = SessionLocal()
+    # 采集 I/O 期间不持有 DB session（DATABASE_DEVELOPMENT.md §8）；
+    # run_crawl 内部在抓取完成后用独立短事务入库，故此处不传 db。
     try:
         from services.crawler import run_crawl
         result = run_crawl(
@@ -142,9 +144,9 @@ def _run_crawl_job(
             enable_enrich=enable_enrich,
             enable_email=enable_email,
             enable_deep_email=enable_deep_email,
+            enable_scrapecreators=enable_scrape_creators,
             on_progress=on_progress,
             commit=True,
-            db=db,
             batch=job["batch"],
             custom_queries=custom_queries or [],
             custom_product_terms=custom_product_terms or {},
@@ -156,8 +158,6 @@ def _run_crawl_job(
         job["status"] = "failed"
         job["error"] = str(e)
         job["finished_at"] = datetime.utcnow().isoformat()
-    finally:
-        db.close()
 
 
 class CrawlerProductIn(BaseModel):
@@ -325,13 +325,14 @@ def start_crawl(
         "enable_enrich": body.enable_enrich,
         "enable_email": body.enable_email,
         "enable_deep_email": body.enable_deep_email,
+        "enable_scrape_creators": body.enable_scrape_creators,
         "batch": f"crawl-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
         "started_at": datetime.utcnow().isoformat(),
     }
     background_tasks.add_task(
         _run_crawl_job, job_id, canonical_products, body.enable_enrich,
         body.enable_email, body.custom_queries, body.enable_deep_email,
-        custom_product_terms,
+        custom_product_terms, body.enable_scrape_creators,
     )
     return {"job_id": job_id, "batch": _crawl_jobs[job_id]["batch"]}
 

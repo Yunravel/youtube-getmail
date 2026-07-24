@@ -24,6 +24,7 @@ from urllib.parse import quote
 from sqlalchemy.orm import Session
 
 from config import settings
+from db import SessionLocal
 from services.crawler import enrich, normalize, youtube
 from services.crawler.config_rules import (
     allowedByProduct,
@@ -32,6 +33,7 @@ from services.crawler.config_rules import (
     positiveSeeds,
 )
 from services.crawler.fetcher import HttpxFetcher, gather_pool
+from services.crawler.scrapecreators import ScrapeCreatorsClient
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +89,169 @@ async def _discover(
     if on_progress:
         on_progress(len(queries), len(queries), "discovery")
     return list(found.values())
+
+
+async def _discover_via_scrapecreators(
+    products: list[str],
+    custom_queries: list[str],
+    on_progress: ProgressFn | None,
+) -> list[dict]:
+    """阶段 1.5：用 ScrapeCreators API 端到端抓取（搜索 → profile → 构建行）。
+
+    与现有 YouTube HTML 发现路径并存：这里直接产出已构建好的候选行 dict
+    （normalize.build_candidate_row 的输出），不依赖 _enrich_and_collect_emails。
+
+    覆盖 YouTube / TikTok / Instagram 三平台。按 API 计费，故默认关闭，需显式启用。
+
+    返回值：候选行 dict 列表，直接 extend 进 pipeline 的 rows。
+    """
+    client = ScrapeCreatorsClient()
+    if not client.is_configured:
+        logger.warning("ScrapeCreators 阶段跳过：API key 未配置")
+        return []
+
+    # 复用 make_queries 拿到 (product, query) 列表，不改其签名。
+    from services.crawler.config_rules import allowedByProduct
+    from scripts._parse_utils import platform_normalize
+
+    queries = make_queries(products)
+    for q in (custom_queries or []):
+        queries.append(("自定义", q))
+
+    # 任务粒度：(platform, product, query) 三元组，每个平台独立搜。
+    platforms = ["youtube", "tiktok", "instagram"]
+    tasks: list[tuple[str, str, str]] = []
+    for platform in platforms:
+        for product, query in queries:
+            tasks.append((platform, product, query))
+
+    found: dict[tuple[str, str], dict] = {}  # (platform, handle_lower) -> row
+    done = 0
+    total = len(tasks)
+
+    async def _sc_search(task: tuple[str, str, str]) -> None:
+        nonlocal done
+        platform, product, query = task
+        try:
+            items = await client.search_platform(platform, query)
+        except Exception as exc:  # noqa: BLE001 — 防御：单条失败不影响整池
+            logger.warning("ScrapeCreators 搜索 %s/%s 失败: %s", platform, query, exc)
+            items = []
+        for item in items:
+            username = client.extract_username(item)
+            if not username:
+                continue
+            # 先按 (platform, handle) 去重，再 fetch_profile——否则同一 handle 跨多个查询
+            # 会被重复抓 profile，浪费 API 额度（同一 KOL 常命中 10+ 关键词）。
+            key = (platform, username.lower())
+            if key in found:
+                continue
+            # 取 profile 拿完整字段（粉丝/邮箱/国家）。失败则用搜索结果里的有限字段。
+            profile = await client.fetch_profile(platform, username) or item
+            row = _build_scrapecreators_row(
+                client, platform, username, profile, product, query,
+                platform_normalize, allowedByProduct,
+            )
+            if row is None:
+                continue  # 被国家白名单/排除名单过滤
+            found[key] = row
+        done += 1
+        if on_progress and (done % 5 == 0 or done == total):
+            on_progress(done, total, "scrapecreators")
+
+    concurrency = getattr(settings, "CRAWLER_MAX_CONCURRENCY_DISCOVERY", 3)
+    await gather_pool(tasks, concurrency, _sc_search)
+    await client.aclose()
+    if on_progress:
+        on_progress(total, total, "scrapecreators")
+    return list(found.values())
+
+
+def _build_scrapecreators_row(
+    client: ScrapeCreatorsClient,
+    platform: str,
+    username: str,
+    profile: dict,
+    product: str,
+    query: str,
+    platform_normalize,
+    allowed_by_product: dict,
+) -> Optional[dict]:
+    """把 ScrapeCreators profile JSON 组装成一行候选（normalize.build_candidate_row 输出）。
+
+    在这里做国家白名单过滤：推断国家不在产品的 allowed 集合内则丢弃（返回 None）。
+    Unknown 国家保留（与现有 pipeline 行为一致，避免误杀）。
+    """
+    from services.crawler import normalize
+    from services.crawler.profile_parsers import _infer_niche
+
+    country_raw = client.extract_country(profile, platform)
+    # TikTok/IG 无 country 字段时，从简介文本推断（复用现有 countryAliases 正则）
+    if not country_raw:
+        desc = client.extract_description(profile, platform) or ""
+        display = client.extract_display_name(profile, platform) or ""
+        inferred = _infer_country_from_text(f"{display} {desc}")
+        country_raw = inferred or "Unknown"
+    country = _normalize_country_token(country_raw)
+
+    # 国家白名单过滤（与现有 _enrich_and_collect_emails 一致）
+    allowed = allowed_by_product.get(product, set())
+    if allowed and country != "Unknown" and country not in allowed:
+        return None
+
+    # 赛道推断：用 profile 的 description/title 喂 _infer_niche
+    description = client.extract_description(profile, platform)
+    niche = _infer_niche(client.extract_display_name(profile, platform) or "", description or "")
+
+    return normalize.build_candidate_row(
+        platform=platform_normalize(platform),
+        account=username,
+        profile_url=client.extract_profile_url(profile, platform),
+        contact_email=client.extract_email(profile, platform),
+        email_is_business=False,  # ScrapeCreators 不区分商务/个人邮箱
+        email_source_url=client.extract_profile_url(profile, platform),
+        country=country,
+        country_confidence="ScrapeCreators",
+        followers=client.extract_followers(profile, platform),
+        avg_views=client.extract_avg_views(profile, platform),
+        language="en",
+        account_type="个人创作者/工作室",
+        fit_products=[product],
+        recommend_product=product,
+        discovery_queries=[query],
+        discovery_method="ScrapeCreators API",
+    )
+
+
+def _infer_country_from_text(text: str) -> Optional[str]:
+    """从简介/标题文本推断国家（复用 countryAliases 正则表）。
+
+    用于 TikTok/IG——这两个平台的 ScrapeCreators 响应没有 country 字段。
+    """
+    if not text:
+        return None
+    from services.crawler.config_rules import countryAliases
+    for country, pattern in countryAliases:
+        if pattern.search(text):
+            return country
+    return None
+
+
+def _normalize_country_token(raw: str) -> str:
+    """把 ScrapeCreators 返回的国家标识（可能 ISO code / 全称）归一到 allowedByProduct 的字符串。
+
+    ScrapeCreators 可能返回 "US"/"GB"/"United States" 等多种形态。
+    用 countryAliases 做一次匹配；匹配不到则原样返回（交由后续过滤处理）。
+    """
+    if not raw or raw == "Unknown":
+        return "Unknown"
+    text = str(raw).strip()
+    # 先走 countryAliases 正则（它能命中全称 + 部分缩写 + 城市）
+    from services.crawler.config_rules import countryAliases
+    for country, pattern in countryAliases:
+        if pattern.search(text):
+            return country
+    return text
 
 
 async def _enrich_and_collect_emails(
@@ -330,14 +495,18 @@ async def _run_async(
     enable_enrich: bool,
     enable_email: bool,
     enable_deep_email: bool,
+    enable_scrapecreators: bool,
     on_progress: ProgressFn | None,
-    db: Optional[Session],
     batch: str,
-    commit: bool,
     custom_queries: list[str] | None = None,
     custom_product_terms: dict[str, list[str]] | None = None,
-) -> dict:
-    """异步执行全流水线。"""
+) -> tuple[dict, list[dict]]:
+    """异步执行全流水线（纯网络 I/O，不碰数据库）。
+
+    遵循 DATABASE_DEVELOPMENT.md §8：YouTube/Playwright/MX 抓取不在 DB session 内进行。
+    本函数只做「抓取 + 清洗」，返回 ``(stats, cleaned)``；入库由调用方
+    (:func:`run_crawl`) 在 I/O 完成后用独立短事务执行。
+    """
     fetcher = HttpxFetcher()
     custom_queries = custom_queries or []
     stats: dict[str, Any] = {
@@ -346,6 +515,7 @@ async def _run_async(
         "enable_enrich": enable_enrich,
         "enable_email": enable_email,
         "enable_deep_email": enable_deep_email,
+        "enable_scrapecreators": enable_scrapecreators,
         "batch": batch,
         "started_at": datetime.utcnow().isoformat(),
     }
@@ -367,6 +537,17 @@ async def _run_async(
         stats["raw_rows"] = len(rows)
         stats["with_email"] = sum(1 for r in rows if r.get("contact_email"))
 
+        # 阶段 1.5：ScrapeCreators 多平台端到端抓取（与现有 YouTube 路径并存）
+        # 直接产出已构建好的候选行，extend 进 rows，后续共享 MX 校验与入库。
+        if enable_scrapecreators and settings.scrapecreators_is_configured:
+            sc_rows = await _discover_via_scrapecreators(
+                products, custom_queries, on_progress
+            )
+            rows.extend(sc_rows)
+            stats["scrapecreators_rows"] = len(sc_rows)
+            stats["raw_rows"] = len(rows)
+            stats["with_email"] = sum(1 for r in rows if r.get("contact_email"))
+
         # 合并正向种子（多平台扩展产物的一部分）
         if enable_enrich:
             for platform, handle, product, note in positiveSeeds:
@@ -387,18 +568,11 @@ async def _run_async(
             await _mx_validate(fetcher, rows, on_progress)
         stats["mx_validated"] = sum(1 for r in rows if r.get("_mx_valid") is True)
 
-        # 阶段 5：清洗 + 入库
+        # 阶段 5：清洗（纯 CPU，不入库）
         cleaned = _finalize_rows(rows)
-
-        if commit and db is not None:
-            from scripts.import_kol_candidate import upsert_candidates
-            upsert_stats = upsert_candidates(cleaned, db, batch,
-                                             source_label="采集器", commit=True)
-            stats.update(upsert_stats)
-        else:
-            stats["candidate_total"] = len(cleaned)
+        stats["candidate_total"] = len(cleaned)
         stats["finished_at"] = datetime.utcnow().isoformat()
-        return stats
+        return stats, cleaned
     finally:
         await fetcher.aclose()
         # 关闭深度邮箱的 Playwright（如果本次启用过）
@@ -414,6 +588,7 @@ def run_crawl(
     enable_enrich: bool | None = None,
     enable_email: bool | None = None,
     enable_deep_email: bool | None = None,
+    enable_scrapecreators: bool | None = None,
     on_progress: ProgressFn | None = None,
     commit: bool = False,
     db: Optional[Session] = None,
@@ -451,31 +626,38 @@ def run_crawl(
         enable_email = getattr(settings, "CRAWLER_ENABLE_EMAIL", True)
     if enable_deep_email is None:
         enable_deep_email = getattr(settings, "CRAWLER_ENABLE_DEEP_EMAIL", False)
+    if enable_scrapecreators is None:
+        enable_scrapecreators = getattr(settings, "CRAWLER_ENABLE_SCRAPECREATORS", False)
     # 深度邮箱依赖邮箱采集开启
     if enable_deep_email and not enable_email:
         enable_deep_email = False
 
     # 在调用方已有事件循环时（如被 async 端点直接 await），新建独立循环跑。
     # 通常 BackgroundTasks 是同步线程调用，这里直接 get/set 即可。
+    stats: dict[str, Any] = {}
+    cleaned: list[dict] = []
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             # 极少发生：在已有运行循环里同步调用。退到新线程跑。
             import threading
-            result: dict = {}
+            result_box: dict = {}
             exc: list[BaseException] = []
             def _runner():
                 try:
                     new_loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(new_loop)
-                    result.update(new_loop.run_until_complete(_run_async(
+                    res_stats, res_cleaned = new_loop.run_until_complete(_run_async(
                         products, enable_enrich=enable_enrich,
                         enable_email=enable_email, enable_deep_email=enable_deep_email,
+                        enable_scrapecreators=enable_scrapecreators,
                         on_progress=on_progress,
-                        db=db, batch=batch, commit=commit,
+                        batch=batch,
                         custom_queries=custom_queries,
                         custom_product_terms=custom_product_terms,
-                    )))
+                    ))
+                    result_box["stats"] = res_stats
+                    result_box["cleaned"] = res_cleaned
                     new_loop.close()
                 except BaseException as e:
                     exc.append(e)
@@ -484,14 +666,48 @@ def run_crawl(
             t.join()
             if exc:
                 raise exc[0]
-            return result
+            stats, cleaned = result_box["stats"], result_box["cleaned"]
+        else:
+            stats, cleaned = asyncio.run(_run_async(
+                products, enable_enrich=enable_enrich, enable_email=enable_email,
+                enable_deep_email=enable_deep_email,
+                enable_scrapecreators=enable_scrapecreators,
+                on_progress=on_progress, batch=batch,
+                custom_queries=custom_queries,
+                custom_product_terms=custom_product_terms,
+            ))
     except RuntimeError:
-        pass
+        stats, cleaned = asyncio.run(_run_async(
+            products, enable_enrich=enable_enrich, enable_email=enable_email,
+            enable_deep_email=enable_deep_email,
+            enable_scrapecreators=enable_scrapecreators,
+            on_progress=on_progress, batch=batch,
+            custom_queries=custom_queries,
+            custom_product_terms=custom_product_terms,
+        ))
 
-    return asyncio.run(_run_async(
-        products, enable_enrich=enable_enrich, enable_email=enable_email,
-        enable_deep_email=enable_deep_email,
-        on_progress=on_progress, db=db, batch=batch, commit=commit,
-        custom_queries=custom_queries,
-        custom_product_terms=custom_product_terms,
-    ))
+    # I/O 已全部完成（cleaned 为内存列表）。入库用独立短事务，不在抓取期间持有 session。
+    if commit and cleaned:
+        return _persist_crawl(stats, cleaned, db, batch)
+    return stats
+
+
+def _persist_crawl(
+    stats: dict, cleaned: list[dict], db: Optional[Session], batch: str
+) -> dict:
+    """把采集清洗结果写入数据库（短事务，在网络 I/O 完成后调用）。
+
+    db 由调用方提供时复用（HTTP 端点）；否则内部创建独立 session（CLI/scheduler）。
+    """
+    from scripts.import_kol_candidate import upsert_candidates
+
+    own_session = db is None
+    if own_session:
+        db = SessionLocal()
+    try:
+        upsert_stats = upsert_candidates(cleaned, db, batch, source_label="采集器", commit=True)
+        stats.update(upsert_stats)
+        return stats
+    finally:
+        if own_session:
+            db.close()
