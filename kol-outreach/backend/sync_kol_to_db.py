@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import csv
 from db import init_db, SessionLocal
 from models import Kol
+from services.email_utils import ensure_kol_email
 
 init_db()
 db = SessionLocal()
@@ -46,6 +47,9 @@ for csv_path, client in csvs:
             status='pending',
         )
         db.add(kol)
+        db.flush()  # 需要 kol.id 才能写 kol_email 子表（FK）
+        # legacy 脚本：同步 kol_email 子表以防漂移（规范 §5.1）。
+        ensure_kol_email(db, kol.id, email, is_primary=True, source=f"legacy_csv | {client}")
         total_new += 1
 
 db.commit()

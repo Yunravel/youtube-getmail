@@ -2,10 +2,14 @@
 KOL 外联中台 - 数据库连接与 Session 管理
 SQLAlchemy 2.0 风格
 """
+import logging
+
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 # SQLite 需要开 check_same_thread=False 才能在 FastAPI 多线程用
 connect_args = {}
@@ -34,6 +38,11 @@ def get_db():
         db.close()
 
 
+def _is_sqlite() -> bool:
+    """当前 DATABASE_URL 是否指向 SQLite（本地开发库）。"""
+    return settings.DATABASE_URL.startswith("sqlite")
+
+
 def init_db():
     """初始化数据库 - 建表(开发用,生产用 alembic 迁移)。
 
@@ -41,7 +50,20 @@ def init_db():
     生产库靠 ``_ensure_*`` 函数补列。自引入 alembic（2026-07）后，生产 schema 变更
     应走 ``alembic upgrade head``；此处仅保留给本地 SQLite 开发快速建表，避免回归。
     新增列/表请写到 alembic migration，不要在这里继续堆 ``_ensure_*``。
+
+    生产守卫（DATABASE_DEVELOPMENT.md §10）：非 SQLite（PostgreSQL 等生产级库）时，
+    跳过 ``create_all`` 与 ``_ensure_*``，schema 责任完全交给 alembic。
+    部署时必须由 Dockerfile/compose 在启动应用前执行 ``alembic upgrade head``。
     """
+    if not _is_sqlite():
+        logger.warning(
+            "init_db: 检测到非 SQLite 数据库(%s)，跳过 create_all/_ensure_*。"
+            "生产 schema 由 alembic 管理，部署前请确认已执行 'alembic upgrade head'。",
+            settings.DATABASE_URL.split("://", 1)[0] if "://" in settings.DATABASE_URL
+            else settings.DATABASE_URL,
+        )
+        return
+
     # 必须先 import 所有模型,确保它们注册到 Base.metadata
     import models  # noqa: F401  触发模型注册
     Base.metadata.create_all(bind=engine)
@@ -129,6 +151,16 @@ def _ensure_mailbox_schema():
         if "message" in table_names
         else set()
     )
+    credential_columns = (
+        {column["name"] for column in inspector.get_columns("mailbox_credential")}
+        if "mailbox_credential" in table_names
+        else set()
+    )
+    scheduled_reply_columns = (
+        {column["name"] for column in inspector.get_columns("scheduled_reply")}
+        if "scheduled_reply" in table_names
+        else set()
+    )
     with engine.begin() as connection:
         if "is_starred" not in thread_columns:
             connection.execute(text(
@@ -137,6 +169,25 @@ def _ensure_mailbox_schema():
         if "message" in table_names and "attachments" not in message_columns:
             connection.execute(text(
                 "ALTER TABLE message ADD COLUMN attachments JSON"
+            ))
+        if "message" in table_names and "rfc_message_id" not in message_columns:
+            connection.execute(text("ALTER TABLE message ADD COLUMN rfc_message_id VARCHAR(500)"))
+        if "mailbox_credential" in table_names:
+            credential_additions = {
+                "smtp_host": "VARCHAR(100) NOT NULL DEFAULT 'smtp.gmail.com'",
+                "smtp_port": "INTEGER NOT NULL DEFAULT 465",
+                "smtp_use_ssl": "BOOLEAN NOT NULL DEFAULT true",
+                "smtp_verified_at": "TIMESTAMP",
+                "smtp_last_error": "TEXT",
+            }
+            for name, sql_type in credential_additions.items():
+                if name not in credential_columns:
+                    connection.execute(text(
+                        f"ALTER TABLE mailbox_credential ADD COLUMN {name} {sql_type}"
+                    ))
+        if "scheduled_reply" in table_names and "manual_override" not in scheduled_reply_columns:
+            connection.execute(text(
+                "ALTER TABLE scheduled_reply ADD COLUMN manual_override BOOLEAN NOT NULL DEFAULT false"
             ))
         connection.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_thread_is_starred ON thread (is_starred)"
@@ -148,4 +199,7 @@ def _ensure_mailbox_schema():
         connection.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_message_thread_read "
             "ON message (thread_id, is_read)"
+        ))
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_message_rfc_message_id ON message (rfc_message_id)"
         ))

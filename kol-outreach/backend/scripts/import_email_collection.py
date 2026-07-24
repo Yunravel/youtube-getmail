@@ -22,6 +22,7 @@ from openpyxl import load_workbook
 
 from db import SessionLocal
 from models import Kol, KolCandidate, KolEmail
+from services.email_utils import normalize_email
 # 解析工具抽取到共享模块，避免与 import_kol_candidate.py / 采集器三处分叉。
 from scripts._parse_utils import (
     _trunc,
@@ -305,7 +306,7 @@ def run_import(
                     db.flush()
                     for i, em in enumerate(emails):
                         db.add(KolEmail(
-                            kol_id=kol.id, email=em, email_normalized=em,
+                            kol_id=kol.id, email=em, email_normalized=normalize_email(em),
                             is_primary=(i == 0), source=f"邮箱采集结果 | {batch}",
                         ))
                 existing_kol_emails.add(primary)

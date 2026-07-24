@@ -18,6 +18,7 @@ from db import SessionLocal, get_db
 from models import Kol, Message, Thread
 from services.email_content import clean_email_body, is_html_email_body
 from services.attachments import extract_attachments, extract_links_from_text, merge_attachments
+from services.email_utils import ensure_kol_email
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ def _message_fields(payload: dict[str, Any], direction: str) -> dict[str, Option
     )
     body = clean_email_body(raw_body)
     if not body and direction == "outbound":
-        body = "[Snov 已发送此邮件；该事件未返回正文。]"
+        body = "[发信平台已发送此邮件；该事件未返回正文。]"
 
     name = _text(
         prospect.get("name")
@@ -173,10 +174,11 @@ def _stable_message_id(direction: str, fields: dict[str, Optional[str]]) -> str:
     return f"snov:{direction}:{hashlib.sha256(identity.encode()).hexdigest()}"
 
 
-def _get_or_create_kol(db: Session, email: str, name: str) -> Kol:
+def _get_or_create_kol(db: Session, email: str, name: str) -> tuple[Kol, bool]:
+    """返回 ``(kol, created)``。created=True 表示本次新建，可触发画像补全。"""
     kol = db.query(Kol).filter(Kol.email == email).first()
     if kol:
-        return kol
+        return kol, False
     kol = Kol(
         name=name or email.split("@", 1)[0],
         email=email,
@@ -184,8 +186,11 @@ def _get_or_create_kol(db: Session, email: str, name: str) -> Kol:
     )
     db.add(kol)
     db.flush()
+    # 同步 kol_email 子表，避免 webhook 自动创建的 KOL 出现主表有邮箱、
+    # 子表无行的漂移（规范 §5.1）。webhook 路径只接触单个回信邮箱，标记为主邮箱。
+    ensure_kol_email(db, kol.id, email, is_primary=True, source="snov_webhook")
     logger.info("Snov webhook 自动创建 KOL: %s", email)
-    return kol
+    return kol, True
 
 
 def _find_or_create_thread(
@@ -276,6 +281,8 @@ def analyze_inbound_message(message_id: int) -> None:
             thread.status = new_status
         db.commit()
         logger.info("Snov 回信已分析: message=%s intent=%s", message_id, analysis["intent"])
+        from services.auto_reply import evaluate_message_for_auto_reply
+        evaluate_message_for_auto_reply(message_id)
     except Exception:
         db.rollback()
         logger.exception("Snov 回信 AI 分析失败: message=%s", message_id)
@@ -324,7 +331,7 @@ async def snov_webhook(
     if existing:
         return {"status": "duplicate", "message_id": message_id}
 
-    kol = _get_or_create_kol(db, kol_email, _text(fields["kol_name"]))
+    kol, kol_created = _get_or_create_kol(db, kol_email, _text(fields["kol_name"]))
     campaign_id, campaign_name = _campaign_fields(payload)
     thread = _find_or_create_thread(
         db,
@@ -348,16 +355,32 @@ async def snov_webhook(
         received_at=_parse_datetime(fields["received_at"]),
     )
     db.add(message)
+    db.flush()
     if direction == "inbound":
+        from services.auto_reply import supersede_thread_tasks
+        supersede_thread_tasks(db, thread.id, message.id)
         thread.reply_count = (thread.reply_count or 0) + 1
         kol.status = "in_conversation"
     else:
+        from services.auto_reply import cancel_for_outbound
+        cancel_for_outbound(db, thread.id)
         kol.status = "sent"
     db.commit()
     db.refresh(message)
 
     if direction == "inbound":
         background_tasks.add_task(analyze_inbound_message, message.id)
+        from services.quote_source_analysis import analyze_and_save_quote_sources
+        background_tasks.add_task(analyze_and_save_quote_sources, message.id)
+        # 新建的回信 KOL 只有 name+email、无频道画像，异步去 YouTube
+        # 搜频道并用 about 页邮箱验证后回填（不命中则保持空，不影响主流程）。
+        if kol_created:
+            from services.kol_enrich import enrich_reply_kol
+            background_tasks.add_task(enrich_reply_kol, kol.id)
+        # 前面的 BackgroundTask 按添加顺序执行；分析和画像补全完成后再把
+        # 持久任务入队。服务重启也不会丢，失败由调度器重试。
+        from services.feishu_push import enqueue_message_sync
+        background_tasks.add_task(enqueue_message_sync, message.id)
 
     return {
         "status": "accepted",

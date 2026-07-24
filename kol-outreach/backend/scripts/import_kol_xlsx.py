@@ -16,6 +16,7 @@ from sqlalchemy import func
 
 from db import SessionLocal
 from models import Kol, KolEmail, ProjectAssessment
+from services.email_utils import normalize_email
 
 
 EMAIL_RE = re.compile(r"[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
@@ -265,12 +266,12 @@ def _write_assessment_and_emails(db, kol: Kol, item: dict[str, Any]) -> None:
             ))
 
     # kol_email：主邮箱（来自 kol.email）+ 备用邮箱。
-    primary = (kol.email or "").strip().lower()
+    primary = normalize_email(kol.email)
     emails_to_add = []
     if primary:
         emails_to_add.append((primary, True))
     for alt in item.get("alternate_emails") or []:
-        alt_norm = alt.strip().lower()
+        alt_norm = normalize_email(alt)
         if alt_norm and alt_norm != primary:
             emails_to_add.append((alt_norm, False))
     # 幂等：跳过已存在的 (kol_id, email_normalized)。

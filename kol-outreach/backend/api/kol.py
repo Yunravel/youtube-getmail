@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from db import get_db
 from models import Kol
+from services.email_utils import ensure_kol_email
 
 router = APIRouter()
 
@@ -183,6 +184,9 @@ async def import_csv(
             status="pending",
         )
         db.add(kol)
+        db.flush()  # 需要 kol.id 才能写 kol_email 子表（FK）
+        # 同步 kol_email 子表，避免 CSV 导入的 KOL 漂移（规范 §5.1）。
+        ensure_kol_email(db, kol.id, email, is_primary=True, source="csv_import")
         imported += 1
 
     db.commit()
@@ -306,3 +310,31 @@ async def import_email_collection(
     except ValueError as e:
         raise HTTPException(422, str(e))
     return stats
+
+
+@router.post("/enrich-empty")
+def enrich_empty_profiles(db: Session = Depends(get_db)):
+    """补全回信建档、但无频道画像的 KOL。
+
+    找出所有 channel_url 为空 且 status 属于回信类（in_conversation / sent）
+    的 KOL，丢线程池异步用 name 搜 YouTube + about 页邮箱验证后填空式回写。
+    立即返回排队数量，不等待抓取完成。
+    """
+    from services.kol_enrich import enrich_reply_kol, ENRICHABLE_STATUSES
+    from concurrent.futures import ThreadPoolExecutor
+
+    rows = (
+        db.query(Kol.id)
+        .filter(Kol.status.in_(ENRICHABLE_STATUSES))
+        .filter((Kol.channel_url == None) | (Kol.channel_url == ""))  # noqa: E711
+        .all()
+    )
+    kol_ids = [r[0] for r in rows]
+    if not kol_ids:
+        return {"queued": 0}
+
+    pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="kol-enrich")
+    for kid in kol_ids:
+        pool.submit(enrich_reply_kol, kid)
+    pool.shutdown(wait=False)
+    return {"queued": len(kol_ids)}

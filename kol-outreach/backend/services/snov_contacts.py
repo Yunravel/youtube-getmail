@@ -8,6 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from models import Kol
+from services.email_utils import ensure_kol_email, normalize_email
 
 
 def _text(value: Any) -> str | None:
@@ -180,16 +181,30 @@ def sync_snov_contacts(db: Session, client) -> dict[str, Any]:
                     if not emails:
                         result["skipped"] += 1
                         continue
-                    for email in emails:
+                    for idx, email in enumerate(emails):
                         result["seen"] += 1
                         kol = db.query(Kol).filter(func.lower(Kol.email) == email).first()
-                        if kol is None:
+                        created = kol is None
+                        if created:
                             name = fields.get("full_name") or email.split("@", 1)[0]
                             kol = Kol(name=name, email=email, status="pending")
                             db.add(kol)
+                            # 需要主键 id 才能写 kol_email 子表（FK）。
+                            db.flush()
                             result["created"] += 1
                         else:
                             result["updated"] += 1
+
+                        # 同步 kol_email 子表：首个邮箱为主，其余为备用。
+                        # 规范 §5.1：kol.email 是兼容性主邮箱投影，必须与 kol_email
+                        # 保持一致，不能只写主表漏掉子表（这是历史 236 行漂移的根因）。
+                        ensure_kol_email(
+                            db,
+                            kol.id,
+                            email,
+                            is_primary=(idx == 0),
+                            source=f"snov_import | {list_name or list_id}",
+                        )
 
                         list_ids = list(kol.snov_list_ids or [])
                         if list_id not in list_ids:
