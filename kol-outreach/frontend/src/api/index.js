@@ -18,6 +18,7 @@ api.interceptors.response.use(
 // ===== KOL =====
 export const kolApi = {
   list: (params) => api.get('/kols', { params }),
+  filterOptions: () => api.get('/kols/filters/options'),
   get: (id) => api.get(`/kols/${id}`),
   importCsv: (file) => {
     const form = new FormData()
@@ -80,8 +81,8 @@ export const statsApi = {
     api.get('/stats/campaign-rates', { params: { project } }),
 }
 
-// ===== Snov 营销活动 =====
-export const snovApi = {
+// ===== 营销活动与待发送名单 =====
+export const campaignApi = {
   campaigns: () => api.get('/snov/campaigns'),
   createProspectListFromKols: (listName, kolIds) =>
     api.post('/snov/prospect-lists/from-kols', {
@@ -110,11 +111,14 @@ export const crawlerApi = {
   // 触发采集（后台任务），立即返回 job_id
   // products 和 customQueries 至少有一个非空
   start: (products, {
-    enableEnrich = true, enableEmail = true, enableDeepEmail = false, customQueries = [],
+    enableEnrich = true, enableEmail = true, enableDeepEmail = false,
+    enableScrapeCreators = false, customQueries = [],
   } = {}) =>
     api.post('/crawler',
       { products, enable_enrich: enableEnrich, enable_email: enableEmail,
-        enable_deep_email: enableDeepEmail, custom_queries: customQueries },
+        enable_deep_email: enableDeepEmail,
+        enable_scrape_creators: enableScrapeCreators,
+        custom_queries: customQueries },
       { headers: CRAWLER_TOKEN_HEADERS }),
   // 查询最新采集任务进度（前端定时轮询）
   status: () => api.get('/crawler/status', { headers: CRAWLER_TOKEN_HEADERS }),
@@ -129,6 +133,26 @@ export const mailboxCredentialApi = {
   remove: (id) => api.delete(`/mailbox-credentials/${id}`),
   // 从发信平台批量导入已配置的发信邮箱（密码留空待填）
   importFromProvider: () => api.post('/mailbox-credentials/import-from-provider'),
+  testSmtp: (id) => api.post(`/mailbox-credentials/${id}/test-smtp`),
+}
+
+// ===== 报价自动回复 =====
+export const autoReplyApi = {
+  templates: () => api.get('/auto-replies/templates'),
+  saveTemplate: (data) => api.put('/auto-replies/templates', data),
+  previewTemplate: (data) => api.post('/auto-replies/templates/preview', data),
+  setEnabled: (enabled) => api.put('/auto-replies/settings', { enabled }),
+  threadTask: (threadId) => api.get(`/auto-replies/threads/${threadId}/task`),
+  createManual: (threadId, subject, body, { scheduledAt = null, sendNow = false } = {}) =>
+    api.post(`/auto-replies/threads/${threadId}/manual`, {
+      subject, body, scheduled_at: scheduledAt, send_now: sendNow,
+    }),
+  updateDraft: (taskId, subject, body) =>
+    api.patch(`/auto-replies/tasks/${taskId}`, { subject, body }),
+  cancelTask: (taskId) => api.post(`/auto-replies/tasks/${taskId}/cancel`),
+  scheduleTask: (taskId, scheduledAt) =>
+    api.post(`/auto-replies/tasks/${taskId}/schedule`, { scheduled_at: scheduledAt }),
+  sendNow: (taskId) => api.post(`/auto-replies/tasks/${taskId}/send-now`),
 }
 
 // ===== 附件同步与下载 =====

@@ -9,6 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from db import get_db
@@ -65,23 +66,59 @@ class KolOut(BaseModel):
         from_attributes = True
 
 
-@router.get("", response_model=list[KolOut])
+@router.get("")
 def list_kols(
     status: Optional[str] = None,
     niche: Optional[str] = None,
+    country: Optional[str] = None,
+    min_followers: Optional[int] = Query(None, ge=0),
+    max_followers: Optional[int] = Query(None, ge=0),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
-    """KOL 列表(分页 + 筛选)"""
+    """KOL 列表(分页 + 筛选)。
+
+    筛选维度：status / niche / country / 粉丝数区间(min_followers, max_followers)。
+    niche 与 country 均为子串模糊匹配（数据存在中英文混杂，精确匹配不实用）。
+    粉丝数以 subscribers 为准（与列表展示口径一致）。
+    返回 ``{items, total}``，total 为精确总数，供前端分页。
+    """
     q = db.query(Kol)
     if status:
         q = q.filter(Kol.status == status)
     if niche:
-        q = q.filter(Kol.niche == niche)
+        q = q.filter(Kol.niche.ilike(f"%{niche}%"))
+    if country:
+        q = q.filter(Kol.country.ilike(f"%{country}%"))
+    if min_followers is not None:
+        q = q.filter(Kol.subscribers >= min_followers)
+    if max_followers is not None:
+        q = q.filter(Kol.subscribers <= max_followers)
     total = q.count()
     items = q.order_by(Kol.id.desc()).offset((page - 1) * size).limit(size).all()
-    return items
+    return {"items": items, "total": total}
+
+
+@router.get("/filters/options")
+def kol_filter_options(db: Session = Depends(get_db)):
+    """KOL 列表筛选项的可选值（国家去重列表，供前端下拉）。
+
+    仅返回出现频次 >= 2 的国家，过滤掉脏值（/、Unknown 等）和一次性拼写。
+    """
+    rows = (
+        db.query(Kol.country, func.count(Kol.id))
+        .filter(Kol.country.isnot(None))
+        .filter(Kol.country != "")
+        .group_by(Kol.country)
+        .having(func.count(Kol.id) >= 2)
+        .order_by(func.count(Kol.id).desc())
+        .all()
+    )
+    # 过滤明显脏值
+    dirty = {"/", "unknown", "unknown "}
+    countries = [r[0] for r in rows if r[0].strip().lower() not in dirty]
+    return {"countries": countries}
 
 
 @router.get("/{kol_id}", response_model=KolOut)
@@ -137,7 +174,6 @@ async def import_csv(
         email = email.lower()
 
         # 去重(按不区分大小写的 email)
-        from sqlalchemy import func
         exists = db.query(Kol).filter(func.lower(Kol.email) == email).first()
         if exists:
             skipped += 1

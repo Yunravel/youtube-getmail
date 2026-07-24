@@ -6,13 +6,13 @@
       style="margin-bottom: 16px"
       message="联系人会在邮件发出或收到回信时自动同步到这里；也可以手动导入 CSV。"
     />
-    <a-space style="margin-bottom: 16px">
+    <a-space style="margin-bottom: 16px" wrap>
       <a-select
         v-model:value="filters.status"
-        style="width: 150px"
+        style="width: 140px"
         placeholder="状态"
         allow-clear
-        @change="load"
+        @change="applyFilter"
       >
         <a-select-option value="pending">待发</a-select-option>
         <a-select-option value="sent">已发</a-select-option>
@@ -24,7 +24,38 @@
         style="width: 150px"
         placeholder="赛道"
         allow-clear
-        @change="load"
+        @change="applyFilter"
+      />
+      <a-select
+        v-model:value="filters.country"
+        style="width: 180px"
+        placeholder="国家"
+        allow-clear
+        show-search
+        :options="countryOptions"
+        :field-names="{ label: 'value', value: 'value' }"
+        :filter-option="(input, option) => option.value.toLowerCase().includes(input.toLowerCase())"
+        @change="applyFilter"
+      />
+      <a-input-number
+        v-model:value="filters.minFollowers"
+        style="width: 130px"
+        placeholder="最小粉丝"
+        :min="0"
+        :step="1000"
+        :formatter="value => value ? Number(value).toLocaleString() : ''"
+        :parser="value => value.replace(/[^\d]/g, '')"
+        @change="applyFilter"
+      />
+      <a-input-number
+        v-model:value="filters.maxFollowers"
+        style="width: 130px"
+        placeholder="最大粉丝"
+        :min="0"
+        :step="1000"
+        :formatter="value => value ? Number(value).toLocaleString() : ''"
+        :parser="value => value.replace(/[^\d]/g, '')"
+        @change="applyFilter"
       />
       <a-button @click="load"><reload-outlined /> 刷新</a-button>
       <a-button
@@ -37,10 +68,10 @@
       </a-button>
       <a-button
         :disabled="selectedIds.length === 0"
-        :loading="pushingToSnov"
-        @click="openSnovModal"
+        :loading="creatingSendList"
+        @click="openSendListModal"
       >
-        <send-outlined /> 创建 Snov 待发送名单 ({{ selectedIds.length }})
+        <send-outlined /> 创建待发送名单 ({{ selectedIds.length }})
       </a-button>
     </a-space>
 
@@ -68,11 +99,6 @@
         </template>
         <template v-else-if="column.key === 'status'">
           <a-tag :color="statusColor(record.status)">{{ statusLabel(record.status) }}</a-tag>
-        </template>
-        <template v-else-if="column.key === 'personal_intro'">
-          <a-tooltip :title="record.personal_intro">
-            <span>{{ record.personal_intro ? record.personal_intro.slice(0, 30) + '…' : '—' }}</span>
-          </a-tooltip>
         </template>
         <template v-else-if="column.key === 'action'">
           <a-popconfirm title="确定删除?" @confirm="del(record.id)">
@@ -106,12 +132,12 @@
     </a-modal>
 
     <a-modal
-      v-model:open="showSnovModal"
-      title="创建 Snov 待发送名单"
-      :confirm-loading="pushingToSnov"
+      v-model:open="showSendListModal"
+      title="创建待发送名单"
+      :confirm-loading="creatingSendList"
       ok-text="创建并推送"
       cancel-text="取消"
-      @ok="doPushToSnov"
+      @ok="createSendList"
     >
       <a-alert
         type="warning"
@@ -122,28 +148,28 @@
       <a-form layout="vertical">
         <a-form-item label="名单名称" required>
           <a-input
-            v-model:value="snovListName"
+            v-model:value="sendListName"
             :maxlength="200"
             placeholder="例：待发送-20260719-1430"
-            @press-enter="doPushToSnov"
+            @press-enter="createSendList"
           />
         </a-form-item>
       </a-form>
     </a-modal>
 
     <a-modal
-      v-model:open="showSnovResultModal"
-      title="Snov 名单创建结果"
+      v-model:open="showSendListResultModal"
+      title="待发送名单创建结果"
       :footer="null"
       width="720px"
     >
-      <a-descriptions v-if="snovResult" bordered size="small" :column="3">
-        <a-descriptions-item label="名单">{{ snovResult.list_name }}</a-descriptions-item>
-        <a-descriptions-item label="新增">{{ snovResult.added }}</a-descriptions-item>
-        <a-descriptions-item label="更新">{{ snovResult.updated }}</a-descriptions-item>
-        <a-descriptions-item label="已存在">{{ snovResult.unchanged }}</a-descriptions-item>
-        <a-descriptions-item label="跳过">{{ snovResult.skipped }}</a-descriptions-item>
-        <a-descriptions-item label="失败">{{ snovResult.failed }}</a-descriptions-item>
+      <a-descriptions v-if="sendListResult" bordered size="small" :column="3">
+        <a-descriptions-item label="名单">{{ sendListResult.list_name }}</a-descriptions-item>
+        <a-descriptions-item label="新增">{{ sendListResult.added }}</a-descriptions-item>
+        <a-descriptions-item label="更新">{{ sendListResult.updated }}</a-descriptions-item>
+        <a-descriptions-item label="已存在">{{ sendListResult.unchanged }}</a-descriptions-item>
+        <a-descriptions-item label="跳过">{{ sendListResult.skipped }}</a-descriptions-item>
+        <a-descriptions-item label="失败">{{ sendListResult.failed }}</a-descriptions-item>
       </a-descriptions>
       <a-alert
         v-if="problemResults.length"
@@ -169,16 +195,15 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { ReloadOutlined, SendOutlined, ThunderboltOutlined } from '@ant-design/icons-vue'
-import { kolApi, snovApi } from '../api'
+import { campaignApi, kolApi } from '../api'
 
 const columns = [
   { title: 'ID', dataIndex: 'id', width: 60 },
   { title: '博主名', key: 'name' },
   { title: '邮箱', dataIndex: 'email' },
   { title: '粉丝', key: 'subscribers', width: 100 },
-  { title: '国家', dataIndex: 'country', width: 80 },
-  { title: '赛道', dataIndex: 'niche', width: 100 },
-  { title: 'AI 开场白', key: 'personal_intro' },
+  { title: '国家', dataIndex: 'country', width: 100 },
+  { title: '赛道', dataIndex: 'niche', width: 120 },
   { title: '状态', key: 'status', width: 100 },
   { title: '操作', key: 'action', width: 80 },
 ]
@@ -194,18 +219,25 @@ const loading = ref(false)
 const page = ref(1)
 const size = ref(50)
 const total = ref(0)
-const filters = reactive({ status: undefined, niche: undefined })
+const filters = reactive({
+  status: undefined,
+  niche: undefined,
+  country: undefined,
+  minFollowers: undefined,
+  maxFollowers: undefined,
+})
+const countryOptions = ref([])
 const selectedIds = ref([])
 const showGenerateModal = ref(false)
 const generating = ref(false)
 const ourProduct = ref('')
-const showSnovModal = ref(false)
-const showSnovResultModal = ref(false)
-const pushingToSnov = ref(false)
-const snovListName = ref('')
-const snovResult = ref(null)
+const showSendListModal = ref(false)
+const showSendListResultModal = ref(false)
+const creatingSendList = ref(false)
+const sendListName = ref('')
+const sendListResult = ref(null)
 const problemResults = computed(() =>
-  (snovResult.value?.results || [])
+  (sendListResult.value?.results || [])
     .filter(item => ['failed', 'skipped'].includes(item.status))
     .map(item => ({
       ...item,
@@ -217,22 +249,41 @@ let refreshTimer = null
 async function load() {
   loading.value = true
   try {
-    data.value = await kolApi.list({
+    const res = await kolApi.list({
       status: filters.status,
       niche: filters.niche,
+      country: filters.country,
+      min_followers: filters.minFollowers,
+      max_followers: filters.maxFollowers,
       page: page.value,
       size: size.value,
     })
-    total.value = data.value.length < size.value
-      ? (page.value - 1) * size.value + data.value.length
-      : page.value * size.value + 1
+    // 后端返回 {items, total}；兼容旧版裸 list 返回。
+    data.value = res.items ?? res ?? []
+    total.value = res.total ?? data.value.length
   } finally {
     loading.value = false
   }
 }
 
+async function loadCountryOptions() {
+  try {
+    const res = await kolApi.filterOptions()
+    countryOptions.value = (res.countries || []).map(c => ({ value: c, label: c }))
+  } catch (e) {
+    // 国家选项加载失败不阻塞列表展示
+    countryOptions.value = []
+  }
+}
+
 function onPage(p) {
   page.value = p
+  load()
+}
+
+// 任意筛选条件变化时回到第 1 页再查询，避免在非首页筛选导致空页。
+function applyFilter() {
+  page.value = 1
   load()
 }
 
@@ -244,49 +295,49 @@ function selectionProps(record) {
   const disabled = record.status !== 'pending' || !record.email
   return {
     disabled,
-    title: disabled ? '仅有主邮箱的待发 KOL 可以推送到 Snov' : undefined,
+    title: disabled ? '仅有主邮箱的待发 KOL 可以加入待发送名单' : undefined,
   }
 }
 
-function defaultSnovListName() {
+function defaultSendListName() {
   const now = new Date()
   const pad = value => String(value).padStart(2, '0')
   return `待发送-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
 }
 
-function openSnovModal() {
-  snovListName.value = defaultSnovListName()
-  showSnovModal.value = true
+function openSendListModal() {
+  sendListName.value = defaultSendListName()
+  showSendListModal.value = true
 }
 
-async function doPushToSnov() {
-  const name = snovListName.value.trim()
+async function createSendList() {
+  const name = sendListName.value.trim()
   if (!name) {
     message.warning('请输入名单名称')
     return
   }
-  if (pushingToSnov.value) return
+  if (creatingSendList.value) return
 
-  pushingToSnov.value = true
+  creatingSendList.value = true
   try {
-    const result = await snovApi.createProspectListFromKols(name, selectedIds.value)
-    snovResult.value = result
+    const result = await campaignApi.createProspectListFromKols(name, selectedIds.value)
+    sendListResult.value = result
     const succeeded = new Set(result.successful_kol_ids || [])
     selectedIds.value = selectedIds.value.filter(id => !succeeded.has(id))
-    showSnovModal.value = false
-    showSnovResultModal.value = true
+    showSendListModal.value = false
+    showSendListResultModal.value = true
     if (!result.list_id) {
-      message.warning('没有符合条件的联系人，未创建 Snov 名单')
+      message.warning('没有符合条件的联系人，未创建待发送名单')
     } else if (result.failed || result.skipped) {
       message.warning(`名单已创建，成功 ${succeeded.size} 条，跳过 ${result.skipped} 条，失败 ${result.failed} 条`)
     } else {
-      message.success(`Snov 名单创建完成，共处理 ${succeeded.size} 位 KOL`)
+      message.success(`待发送名单创建完成，共处理 ${succeeded.size} 位 KOL`)
     }
     load()
   } catch (e) {
-    message.error(e.response?.data?.detail || '创建 Snov 待发送名单失败')
+    message.error(e.response?.data?.detail || '创建待发送名单失败')
   } finally {
-    pushingToSnov.value = false
+    creatingSendList.value = false
   }
 }
 
@@ -326,6 +377,7 @@ function statusLabel(s) {
 }
 
 onMounted(async () => {
+  loadCountryOptions()
   await load()
   refreshTimer = window.setInterval(load, 120000)
 })
