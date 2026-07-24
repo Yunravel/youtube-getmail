@@ -25,6 +25,7 @@ from openpyxl import load_workbook
 
 from db import SessionLocal
 from models import Kol, KolCandidate, KolEmail
+from services.country_normalize import normalize_country_for_storage
 from services.email_utils import normalize_email
 # 解析工具抽取到共享模块，避免与 import_email_collection.py / 采集器三处分叉。
 from scripts._parse_utils import (
@@ -206,9 +207,11 @@ def upsert_candidates(
                     social_handle=item["account"][:200] or None,
                     profile_url=(item.get("profile_url") or "")[:500] or None,
                     channel_url=(item.get("profile_url") or "")[:500] or None,
-                    country=(item.get("country_region") or "")[:50] or None,
-                    niche=(item.get("recommend_product") or "")[:100] or None,
-                    content_category=(item.get("recommend_product") or "")[:150] or None,
+                    country=normalize_country_for_storage(item.get("country_region")),
+                    # niche/content_category 是内容赛道，不该写产品名；
+                    # 产品归属在下方 fit_project_code。此导入源无赛道信息，留 NULL。
+                    niche=None,
+                    content_category=None,
                     # 粉丝数（followers/subscribers 同源；subscribers 是 YouTube 订阅数）
                     followers=item.get("followers") or 0,
                     subscribers=item.get("followers") or 0,

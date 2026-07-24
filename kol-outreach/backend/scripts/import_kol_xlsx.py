@@ -18,6 +18,7 @@ from db import SessionLocal
 from models import Kol, KolEmail, ProjectAssessment
 from services.country_normalize import normalize_country_for_storage
 from services.email_utils import normalize_email
+from services.niche_normalize import classify_niche
 
 
 EMAIL_RE = re.compile(r"[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
@@ -300,14 +301,15 @@ def classify_and_merge(cleaned: list[dict[str, Any]], commit: bool) -> dict[str,
                 item["import_action"] = "新增"
                 counts["new"] += 1
                 if commit:
+                    niche_norm, niche_product = classify_niche(item["content_category"])
                     kol = Kol(
                         name=item["name"], full_name=item["name"], email=item["email"],
                         channel_url=item["profile_url"] or None, profile_url=item["profile_url"] or None,
                         platform=item["platform"] or None, social_handle=item["social_handle"] or None,
                         followers=item["followers"], subscribers=item["followers"],
                         country=normalize_country_for_storage(item["country"]), priority=item["priority"] or None,
-                        content_category=item["content_category"] or None,
-                        niche=item["content_category"] or None, company_site=item["company_site"] or None,
+                        content_category=niche_norm,
+                        niche=niche_norm, company_site=item["company_site"] or None,
                         recent_videos=item["recent_videos"] or None, source=item["source"],
                         contact_notes=(f"{SOURCE_MARKER}\n{item['contact_notes']}" if item["contact_notes"] else SOURCE_MARKER),
                         status="pending",
@@ -319,7 +321,7 @@ def classify_and_merge(cleaned: list[dict[str, Any]], commit: bool) -> dict[str,
                         collect_status=item.get("collect_status"),
                         collect_at=item.get("collect_at"),
                         source_link=item.get("source_link"),
-                        fit_project_code=item.get("fit_project_code"),
+                        fit_project_code=niche_product or item.get("fit_project_code"),
                     )
                     db.add(kol)
                     db.flush()  # 拿到 kol.id，供子表外键用

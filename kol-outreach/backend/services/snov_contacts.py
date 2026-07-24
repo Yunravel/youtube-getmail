@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from models import Kol
 from services.country_normalize import normalize_country_for_storage
 from services.email_utils import ensure_kol_email, normalize_email
+from services.niche_normalize import classify_niche
 
 
 def _text(value: Any) -> str | None:
@@ -221,7 +222,14 @@ def sync_snov_contacts(db: Session, client) -> dict[str, Any]:
                         kol.name = fields.get("full_name") or kol.name
                         kol.channel_url = fields.get("profile_url") or kol.channel_url
                         kol.subscribers = fields.get("followers") or kol.subscribers or 0
-                        kol.niche = fields.get("content_category") or kol.niche
+                        # 赛道归一：Snov content_category 可能混入产品名/自由文本，
+                        # 剥离产品名到 fit_project_code，赛道归一写 niche。
+                        niche_norm, niche_product = classify_niche(fields.get("content_category"))
+                        if niche_norm:
+                            kol.niche = niche_norm
+                            kol.content_category = niche_norm
+                        if niche_product and not kol.fit_project_code:
+                            kol.fit_project_code = niche_product
 
                 db.flush()
                 total = int((payload.get("list") or {}).get("contacts") or 0)

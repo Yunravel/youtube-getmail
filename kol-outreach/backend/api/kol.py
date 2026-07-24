@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from db import get_db
 from models import Kol
 from services.country_normalize import normalize_country_for_storage
+from services.niche_normalize import classify_niche
 from services.email_utils import ensure_kol_email
 
 router = APIRouter()
@@ -203,6 +204,9 @@ async def import_csv(
             skipped += 1
             continue
 
+        # 赛道归一：人工填的 niche 可能混入产品名，剥离产品名到 fit_project_code。
+        niche_norm, niche_product = classify_niche(row.get("niche", "").strip() or None)
+
         kol = Kol(
             channel_id=row.get("channel_id", "").strip() or None,
             name=name,
@@ -210,7 +214,7 @@ async def import_csv(
             email=email,
             subscribers=subscribers,
             country=normalize_country_for_storage(row.get("country", "")),
-            niche=row.get("niche", "").strip() or None,
+            niche=niche_norm,
             recent_videos=recent_videos,
             full_name=name,
             first_name=(row.get("firstName") or "").strip() or None,
@@ -226,10 +230,11 @@ async def import_csv(
             profile_url=(row.get("customFields[profileUrl]") or row.get("channel_url") or "").strip() or None,
             followers=subscribers,
             priority=(row.get("customFields[priority]") or "").strip().upper() or None,
-            content_category=(row.get("customFields[contentCategory]") or row.get("niche") or "").strip() or None,
+            content_category=niche_norm,  # 与 niche 同步（归一后的规范赛道）
             source=(row.get("customFields[source]") or "").strip() or None,
             contact_notes=(row.get("customFields[notes]") or "").strip() or None,
             snov_list_id=(row.get("listId") or "").strip() or None,
+            fit_project_code=niche_product,  # 产品名剥离到产品归属字段
             status="pending",
         )
         db.add(kol)
