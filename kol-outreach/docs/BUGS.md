@@ -29,8 +29,8 @@
 |---|---|---|---|
 | 高 | BUG-037 | 三处唯一约束查后插并发竞争，修复已并入主干 | 🚀待部署 |
 | 高 | BUG-009~012, 026 | 7/27 三 P0 + 时区换算批次，生产未部署（须带 alembic 0008，部署前勿触发 30 天补录） | 🚀待部署 |
-| 高 | BUG-013 | IMAP 兜底匹配吞掉真实新回信 | ❌未修复 |
-| 高 | BUG-014 | 前端把 UTC 当本地时间；定时发送每确认一轮提前 8 小时 | ❌未修复 |
+| 高 | BUG-013 | IMAP 兜底匹配吞掉真实新回信（已修复待部署） | 🚀待部署 |
+| 高 | BUG-014 | 前端把 UTC 当本地时间；定时发送每确认一轮提前 8 小时（已修复待部署） | 🚀待部署 |
 | 中 | BUG-015 | /api/kols 列表泄漏 snov_raw_data 等内部字段 | ❌未修复 |
 | 中 | BUG-031 | kol.email 无查重约束（双档根因） | ❌未修复 |
 | 中 | BUG-033 | 本地 .env 仍存生产飞书表 token，只有注释约束 | ❌未修复 |
@@ -84,8 +84,8 @@ commit `04bd21c` 基线进入 `fix/db-kol-email-drift`（199 项测试通过）�
 | BUG-010 | P0 | 已发送/已取消任务被复活成 queued（FINAL_STATUSES 定义了但全仓库零引用）；运营手动取消/编辑被覆盖 | `services/auto_reply.py` _upsert_task | 🚀待部署 | evaluate 与 _upsert_task 双层守卫：终态/sending/运营接管（manual_override 或 edited_at）不覆写 |
 | BUG-011 | P0 | 补录击穿 2 小时防误发闸门：日期解析失败回退 `utcnow()`（三条入库通道）判成「刚收到」；叠加报价识别不剥引用块 → 给一个月前拒绝的达人自动回「已收到报价」 | `api/webhook.py` / `api/snov.py` / `services/attachment_sync.py` | 🚀待部署 | 新列 `message.received_at_estimated`（alembic 0008）标记推算时间；estimated 消息只建 manual_review；`quote_detection.strip_quoted_text` 剥引用块 |
 | BUG-012 | P1 | 时区偏移被丢弃而非换算：`+03:00` 存成 15:00（应 12:00 UTC）；影响 2h 窗口/±3 天匹配/跨通道去重 | 日期解析各处 | 🚀待部署 | 与 P0 批次一起改为正确换算 UTC |
-| BUG-013 | P1 | IMAP 匹配兜底吞新回信：同发件人主题完全不同的新邮件被 `candidates[0]` 兜底挂到旧消息上，新回信永不入库 | `services/attachment_sync.py:125` | ❌未修复 | 恰好废掉第三方补录要救的场景；建议主题不匹配时走「未匹配落库」而非兜底 |
-| BUG-014 | P1 | 前端把后端 naive UTC 当本地时间解析，北京时区全站早 8h；ThreadDetail 的 scheduled_at 回填→`toISOString()` 提交，每确认一轮实际发送提前 8h | `frontend/src/views/ThreadDetail.vue:373,442,456` 等 | ❌未修复 | 需后端返回带 Z 或前端 dayjs.utc 插件统一处理 |
+| BUG-013 | P1 | IMAP 匹配兜底吞新回信：同发件人主题完全不同的新邮件被 `candidates[0]` 兜底挂到旧消息上，新回信永不入库 | `services/attachment_sync.py:125` | 🚀待部署 | `031fce7`：主题非空且精确/包含都未命中时返回 None，走 `_ingest_unmatched_email` 未匹配落库；无主题来信保留取最近兜底。新增 4 项回归测试，全套 216 项通过 |
+| BUG-014 | P1 | 前端把后端 naive UTC 当本地时间解析，北京时区全站早 8h；ThreadDetail 的 scheduled_at 回填→`toISOString()` 提交，每确认一轮实际发送提前 8h | `frontend/src/views/ThreadDetail.vue:373,442,456` 等 | 🚀待部署 | `dd2a05f`：新增 `frontend/src/utils/time.js`（dayjs 自带 utc 插件，naive UTC→本地，兼容带 Z/偏移量），ThreadDetail/Mailbox/MailboxSettings 全部改走工具函数；后端接收侧已有 aware→UTC 规范化，无需改动；回填→提交为不动点，npm build 通过 |
 | BUG-015 | P1 | `/api/kols` 列表泄漏内部字段：snov_raw_data、snov_custom_fields、contact_notes、personal_intro | `api/kol.py:74` list_kols | ❌未修复 | `KolOut` 白名单已存在但只用于单个 KOL 接口（:141）；列表返回裸 ORM |
 | BUG-016 | P1 | 国家/赛道筛选用 `ilike('%值%')` 子串匹配，下拉给的是精确枚举值：选 Niger 连带 Nigeria | `api/kol.py:97-99` | ❌未修复 | 两字段已枚举化/归一（742f43a、9f50d75），查询应改精确匹配 |
 | BUG-017 | P1 | 附件文件名写入端允许 `& ' + , ! [ ]`，下载端白名单拒绝 → 存得进下不来（"Rate Card & Pricing.pdf"） | 写 `attachment_sync.py:54` vs 读 `api/attachments.py:97,109` | 🟡部分修复 | 下载正则已含中文/空格/括号（中文名可下了）；`& ' + , ! [ ]` 仍不一致 |
@@ -159,3 +159,4 @@ commit `04bd21c` 基线进入 `fix/db-kol-email-drift`（199 项测试通过）�
 |---|---|
 | 2026-07-27 | 初版：收拢 7/26 诊断、7/26 安全、7/27 深度测试、7/27 飞书溯源、代码评审共 40 条 + 1 证伪 + 2 风险项；逐条核对工作区代码确认状态 |
 | 2026-07-27 | BUG-037 更正：`518e8ca` 已经 `0b00d43` 并入主干（_upsert_task 守卫共存核对无误），状态 🔀待合并 → 🚀待部署 |
+| 2026-07-27 | BUG-013（`031fce7`）、BUG-014（`dd2a05f`）并行修复完成，❌未修复 → 🚀待部署；合并 BUG-037 后的组合状态全套 216 项后端测试通过、前端 build 通过 |
