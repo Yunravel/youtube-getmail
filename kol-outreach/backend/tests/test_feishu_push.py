@@ -319,6 +319,36 @@ class FeishuPushTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_borrowed_session_defers_commit_to_caller(self):
+        db = self.Session()
+        try:
+            self.assertTrue(feishu_push.enqueue_message_sync(self.latest_id, db=db))
+            # Flushed: visible inside the caller's transaction...
+            self.assertEqual(db.query(FeishuSyncTask).count(), 1)
+            # ...but not committed: the caller can still roll it back.
+            db.rollback()
+            self.assertEqual(db.query(FeishuSyncTask).count(), 0)
+            self.assertTrue(feishu_push.enqueue_message_sync(self.latest_id, db=db))
+            db.commit()
+        finally:
+            db.close()
+        check = self.Session()
+        try:
+            task = check.query(FeishuSyncTask).one()
+            self.assertEqual(task.source_message_id, self.latest_id)
+        finally:
+            check.close()
+
+    def test_borrowed_session_keeps_callers_pending_changes_uncommitted(self):
+        db = self.Session()
+        try:
+            db.get(Kol, self.kol_id).name = "MidRequestEdit"
+            self.assertTrue(feishu_push.enqueue_message_sync(self.latest_id, db=db))
+            db.rollback()
+            self.assertEqual(db.get(Kol, self.kol_id).name, "AiRace99")
+        finally:
+            db.close()
+
     def test_reconciliation_queues_latest_message_per_kol(self):
         queued = feishu_push.enqueue_reconciliation()
         self.assertEqual(queued, 1)
