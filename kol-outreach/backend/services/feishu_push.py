@@ -788,7 +788,12 @@ def enqueue_message_sync(
     delay_seconds: int = 0,
     db=None,
 ) -> bool:
-    """Persist or refresh one KOL's synchronization task."""
+    """Persist or refresh one KOL's synchronization task.
+
+    With a borrowed ``db`` session changes are only flushed; commit,
+    rollback and close remain the caller's responsibility so its
+    transaction boundary stays intact.
+    """
     owns_session = db is None
     session = db or SessionLocal()
     try:
@@ -825,10 +830,14 @@ def enqueue_message_sync(
                 task.status = "pending"
                 task.next_retry_at = due
                 task.last_error = None
-        session.commit()
+        if owns_session:
+            session.commit()
+        else:
+            session.flush()
         return True
     except Exception:
-        session.rollback()
+        if owns_session:
+            session.rollback()
         raise
     finally:
         if owns_session:
