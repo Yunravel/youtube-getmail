@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -128,15 +129,38 @@ def _validate_draft(body: str, quote: dict[str, Any]) -> str | None:
     return None
 
 
+def _find_task(db: Session, source_message_id: int) -> ScheduledReply | None:
+    return db.query(ScheduledReply).filter(
+        ScheduledReply.source_message_id == source_message_id
+    ).first()
+
+
 def _upsert_task(db: Session, message: Message, status: str, **values) -> ScheduledReply:
-    task = db.query(ScheduledReply).filter(ScheduledReply.source_message_id == message.id).first()
+    task = _find_task(db, message.id)
+    created = False
     if not task:
-        task = ScheduledReply(thread_id=message.thread_id, source_message_id=message.id, status=status)
-        db.add(task)
-    elif task.status in FINAL_STATUSES or task.status == "sending":
+        # 同一封回信被并发评估时双方都可能查不到既有任务；把插入包在
+        # SAVEPOINT 里，撞 source_message_id 唯一约束就回滚这一小段、
+        # 改为更新对方已建的任务，调用方事务里的其他改动不受影响。
+        # 先 flush 让 SAVEPOINT 只含这条插入，冲突归因不受调用方
+        # 已有改动的干扰。
+        db.flush()
+        try:
+            with db.begin_nested():
+                task = ScheduledReply(
+                    thread_id=message.thread_id, source_message_id=message.id, status=status
+                )
+                db.add(task)
+            created = True
+        except IntegrityError:
+            task = _find_task(db, message.id)
+            if task is None:
+                raise
+    if not created and (task.status in FINAL_STATUSES or task.status == "sending"):
         # 纵深防御：终态（FINAL_STATUSES）与投递中（sending）的任务不得被重评估
         # 覆写/复活——sent 复活成 queued 会重复外发，cancelled 复活会违背运营取消。
         # 业务级守卫在 evaluate_message_for_auto_reply，这里兜底，原样返回。
+        # 并发竞争中恢复出来的对方任务同样受此保护。
         return task
     task.status = status
     for key, value in values.items():

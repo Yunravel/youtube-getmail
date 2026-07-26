@@ -3,8 +3,10 @@ KOL 外联中台 - 数据库连接与 Session 管理
 SQLAlchemy 2.0 风格
 """
 import logging
+import sqlite3
 
 from sqlalchemy import String, create_engine, event, inspect, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 from config import settings
@@ -32,6 +34,37 @@ if not _is_sqlite_url:
     )
 
 engine = create_engine(settings.DATABASE_URL, connect_args=connect_args, **_engine_kwargs)
+
+
+# ---- SQLite SAVEPOINT 语义修复(SQLAlchemy 官方文档方案) ----
+# pysqlite 默认只在 DML 前隐式 BEGIN、SELECT 不开事务。若事务里还没发生过
+# 写入就执行 begin_nested(),SAVEPOINT 会成为最外层事务,而 SQLite 规定
+# 最外层 SAVEPOINT 的 RELEASE 等价于 COMMIT——本该由调用方决定的提交被
+# 提前发生,rollback 也撤不掉。业务里并发去重(feishu_push.enqueue_message_sync、
+# auto_reply._upsert_task)依赖 SAVEPOINT 吸收唯一约束冲突,必须保证其语义正确。
+# 修法:禁用 pysqlite 的隐式 BEGIN,由 SQLAlchemy 的 begin 事件显式发 BEGIN。
+# 注册在 Engine 类上,应用引擎与测试各自建的 SQLite 引擎全部覆盖;PG 连接
+# 不受影响(isinstance/方言名双重守卫)。
+
+
+@event.listens_for(Engine, "connect")
+def _sqlite_disable_implicit_begin(dbapi_connection, connection_record):
+    if isinstance(dbapi_connection, sqlite3.Connection):
+        dbapi_connection.isolation_level = None
+
+
+@event.listens_for(Engine, "begin")
+def _sqlite_explicit_begin(conn):
+    if conn.dialect.name != "sqlite":
+        return
+    # 测试用 StaticPool 时多个 session 共享同一条物理连接,别人已开事务
+    # 就不能再 BEGIN(sqlite 会报 cannot start a transaction within a
+    # transaction),此时沿用该事务即可——与修复前的共享语义一致。
+    dbapi_connection = conn.connection.dbapi_connection
+    if isinstance(dbapi_connection, sqlite3.Connection) and dbapi_connection.in_transaction:
+        return
+    conn.exec_driver_sql("BEGIN")
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
