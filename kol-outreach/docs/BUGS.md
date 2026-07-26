@@ -27,10 +27,6 @@
 
 | 优先 | 编号 | 问题 | 状态 |
 |---|---|---|---|
-| 高 | BUG-037 | 三处唯一约束查后插并发竞争，修复已并入主干 | 🚀待部署 |
-| 高 | BUG-009~012, 026 | 7/27 三 P0 + 时区换算批次，生产未部署（须带 alembic 0008，部署前勿触发 30 天补录） | 🚀待部署 |
-| 高 | BUG-013 | IMAP 兜底匹配吞掉真实新回信（已修复待部署） | 🚀待部署 |
-| 高 | BUG-014 | 前端把 UTC 当本地时间；定时发送每确认一轮提前 8 小时（已修复待部署） | 🚀待部署 |
 | 中 | BUG-015 | /api/kols 列表泄漏 snov_raw_data 等内部字段 | ❌未修复 |
 | 中 | BUG-031 | kol.email 无查重约束（双档根因） | ❌未修复 |
 | 中 | BUG-033 | 本地 .env 仍存生产飞书表 token，只有注释约束 | ❌未修复 |
@@ -73,19 +69,19 @@
 ## 批次 C：2026-07-27 深度测试（P0/P1/P2）
 
 来源：会话「项目深度测试」，全部经可执行测试实证。P0/P1-1/P2-9 的修复已随
-commit `04bd21c` 基线进入 `fix/db-kol-email-drift`（199 项测试通过），**生产未部署**：
-部署必须带 `alembic/versions/20260727_0008_received_at_provenance.py` 并执行
-`alembic upgrade head`，完整文件清单见记忆 `kol-outreach-autoreply-broken-2026-07-27`；
-**部署完成前不得触发 30 天补录**。
+commit `04bd21c` 基线进入 `fix/db-kol-email-drift`，并于 2026-07-27 随部署
+`20260727-f484c61`（容器 GIT_SHA=f484c61aafb21dde92bbcedab900eed475a7fd95）全量上线：
+alembic 已升至 `received_at_prov_0008`，部署验收通过（/health 200、未认证 401、
+认证 200、webhook 订阅 3 条），30 天补录未触发。
 
 | 编号 | 级别 | 问题 | 位置 | 状态 | 修复落点 / 备注 |
 |---|---|---|---|---|---|
-| BUG-009 | P0 | 自动回复发送必崩：commit+close 后把 detached credential 交给 SMTP → DetachedInstanceError；异常逃逸中断整批；任务永久卡 sending | `services/auto_reply.py` send_due_task | 🚀待部署 | `SmtpCredentialSnapshot`（smtp_sender.py）commit 前拍快照；意外异常按 ambiguous 进 manual_review；批内单任务异常不断批；置 sending 改条件 UPDATE 原子抢占 |
-| BUG-010 | P0 | 已发送/已取消任务被复活成 queued（FINAL_STATUSES 定义了但全仓库零引用）；运营手动取消/编辑被覆盖 | `services/auto_reply.py` _upsert_task | 🚀待部署 | evaluate 与 _upsert_task 双层守卫：终态/sending/运营接管（manual_override 或 edited_at）不覆写 |
-| BUG-011 | P0 | 补录击穿 2 小时防误发闸门：日期解析失败回退 `utcnow()`（三条入库通道）判成「刚收到」；叠加报价识别不剥引用块 → 给一个月前拒绝的达人自动回「已收到报价」 | `api/webhook.py` / `api/snov.py` / `services/attachment_sync.py` | 🚀待部署 | 新列 `message.received_at_estimated`（alembic 0008）标记推算时间；estimated 消息只建 manual_review；`quote_detection.strip_quoted_text` 剥引用块 |
-| BUG-012 | P1 | 时区偏移被丢弃而非换算：`+03:00` 存成 15:00（应 12:00 UTC）；影响 2h 窗口/±3 天匹配/跨通道去重 | 日期解析各处 | 🚀待部署 | 与 P0 批次一起改为正确换算 UTC |
-| BUG-013 | P1 | IMAP 匹配兜底吞新回信：同发件人主题完全不同的新邮件被 `candidates[0]` 兜底挂到旧消息上，新回信永不入库 | `services/attachment_sync.py:125` | 🚀待部署 | `031fce7`：主题非空且精确/包含都未命中时返回 None，走 `_ingest_unmatched_email` 未匹配落库；无主题来信保留取最近兜底。新增 4 项回归测试，全套 216 项通过 |
-| BUG-014 | P1 | 前端把后端 naive UTC 当本地时间解析，北京时区全站早 8h；ThreadDetail 的 scheduled_at 回填→`toISOString()` 提交，每确认一轮实际发送提前 8h | `frontend/src/views/ThreadDetail.vue:373,442,456` 等 | 🚀待部署 | `dd2a05f`：新增 `frontend/src/utils/time.js`（dayjs 自带 utc 插件，naive UTC→本地，兼容带 Z/偏移量），ThreadDetail/Mailbox/MailboxSettings 全部改走工具函数；后端接收侧已有 aware→UTC 规范化，无需改动；回填→提交为不动点，npm build 通过 |
+| BUG-009 | P0 | 自动回复发送必崩：commit+close 后把 detached credential 交给 SMTP → DetachedInstanceError；异常逃逸中断整批；任务永久卡 sending | `services/auto_reply.py` send_due_task | ✅已部署 | `SmtpCredentialSnapshot`（smtp_sender.py）commit 前拍快照；意外异常按 ambiguous 进 manual_review；批内单任务异常不断批；置 sending 改条件 UPDATE 原子抢占 |
+| BUG-010 | P0 | 已发送/已取消任务被复活成 queued（FINAL_STATUSES 定义了但全仓库零引用）；运营手动取消/编辑被覆盖 | `services/auto_reply.py` _upsert_task | ✅已部署 | evaluate 与 _upsert_task 双层守卫：终态/sending/运营接管（manual_override 或 edited_at）不覆写 |
+| BUG-011 | P0 | 补录击穿 2 小时防误发闸门：日期解析失败回退 `utcnow()`（三条入库通道）判成「刚收到」；叠加报价识别不剥引用块 → 给一个月前拒绝的达人自动回「已收到报价」 | `api/webhook.py` / `api/snov.py` / `services/attachment_sync.py` | ✅已部署 | 新列 `message.received_at_estimated`（alembic 0008）标记推算时间；estimated 消息只建 manual_review；`quote_detection.strip_quoted_text` 剥引用块 |
+| BUG-012 | P1 | 时区偏移被丢弃而非换算：`+03:00` 存成 15:00（应 12:00 UTC）；影响 2h 窗口/±3 天匹配/跨通道去重 | 日期解析各处 | ✅已部署 | 与 P0 批次一起改为正确换算 UTC |
+| BUG-013 | P1 | IMAP 匹配兜底吞新回信：同发件人主题完全不同的新邮件被 `candidates[0]` 兜底挂到旧消息上，新回信永不入库 | `services/attachment_sync.py:125` | ✅已部署 | `031fce7`：主题非空且精确/包含都未命中时返回 None，走 `_ingest_unmatched_email` 未匹配落库；无主题来信保留取最近兜底。新增 4 项回归测试，全套 216 项通过 |
+| BUG-014 | P1 | 前端把后端 naive UTC 当本地时间解析，北京时区全站早 8h；ThreadDetail 的 scheduled_at 回填→`toISOString()` 提交，每确认一轮实际发送提前 8h | `frontend/src/views/ThreadDetail.vue:373,442,456` 等 | ✅已部署 | `dd2a05f`：新增 `frontend/src/utils/time.js`（dayjs 自带 utc 插件，naive UTC→本地，兼容带 Z/偏移量），ThreadDetail/Mailbox/MailboxSettings 全部改走工具函数；后端接收侧已有 aware→UTC 规范化，无需改动；回填→提交为不动点，npm build 通过 |
 | BUG-015 | P1 | `/api/kols` 列表泄漏内部字段：snov_raw_data、snov_custom_fields、contact_notes、personal_intro | `api/kol.py:74` list_kols | ❌未修复 | `KolOut` 白名单已存在但只用于单个 KOL 接口（:141）；列表返回裸 ORM |
 | BUG-016 | P1 | 国家/赛道筛选用 `ilike('%值%')` 子串匹配，下拉给的是精确枚举值：选 Niger 连带 Nigeria | `api/kol.py:97-99` | ❌未修复 | 两字段已枚举化/归一（742f43a、9f50d75），查询应改精确匹配 |
 | BUG-017 | P1 | 附件文件名写入端允许 `& ' + , ! [ ]`，下载端白名单拒绝 → 存得进下不来（"Rate Card & Pricing.pdf"） | 写 `attachment_sync.py:54` vs 读 `api/attachments.py:97,109` | 🟡部分修复 | 下载正则已含中文/空格/括号（中文名可下了）；`& ' + , ! [ ]` 仍不一致 |
@@ -97,7 +93,7 @@ commit `04bd21c` 基线进入 `fix/db-kol-email-drift`（199 项测试通过）�
 | BUG-023 | P2 | 飞书任务认领置 processing 却不推后 next_retry_at，而 processing 又可认领：调度器与 `POST /api/feishu/process` 并发重复处理同一 KOL | `services/feishu_push.py:962-973` | 🟡部分修复 | 已加 `with_for_update(skip_locked=True)`（仅 PG）防同瞬认领；HTTP 阶段（行锁已释放）仍可被再次认领，认领时应推后 next_retry_at |
 | BUG-024 | P2 | `payload_hash` 只写不读，「未变更跳过」设计从未接线 | `services/feishu_push.py:920,938` | ❌未修复 | 同步前比对 hash 相同则 skip |
 | BUG-025 | P2 | 全量对账把退避中（retry）任务重置为 pending + next_retry_at=now，指数退避被周期性作废 | `services/feishu_push.py:829-832` | ❌未修复 | enqueue 仅保护 conflict；retry 且未到期的任务不应重置 |
-| BUG-026 | P2 | `alembic upgrade head` 在全新 SQLite 库失败：迁移 0007 用了 PostgreSQL 的 `now()` | `alembic/versions/20260724_0007_kol_email_fix.py` | 🚀待部署 | 已改 `CURRENT_TIMESTAMP`；仅影响本地新库（生产 PG 早已跑过 0007），随 P0 批次部署 |
+| BUG-026 | P2 | `alembic upgrade head` 在全新 SQLite 库失败：迁移 0007 用了 PostgreSQL 的 `now()` | `alembic/versions/20260724_0007_kol_email_fix.py` | ✅已部署 | 已改 `CURRENT_TIMESTAMP`；仅影响本地新库（生产 PG 早已跑过 0007），随 P0 批次部署 |
 
 ## 批次 D：2026-07-27 飞书「新增行缺数据」溯源
 
@@ -120,15 +116,15 @@ commit `04bd21c` 基线进入 `fix/db-kol-email-drift`（199 项测试通过）�
 
 | 编号 | 问题 | 位置 | 状态 | 修复落点 / 备注 |
 |---|---|---|---|---|
-| BUG-035 | ensure_kol_email 吞 IntegrityError 后外层 session 带着坏事务继续用 | `services/…ensure_kol_email` | ✅已合并 | `1641a5c`：SAVEPOINT（begin_nested）隔离，失败只回滚子事务 |
-| BUG-036 | enqueue_message_sync 对借用的外部 session 直接 commit，打穿调用方事务边界 | `services/feishu_push.py:786` | ✅已合并 | `ce53afe`：借用 session 只 flush，commit/rollback/close 归调用方 |
-| BUG-037 | 三处唯一约束上的查后插并发竞争：webhook 的 message_id、auto_reply 的 _upsert_task（source_message_id）、feishu 的 enqueue_message_sync（kol_id） | `api/webhook.py` `services/auto_reply.py` `services/feishu_push.py` | 🚀待部署 | `518e8ca`，已经 `0b00d43` 并入 `fix/db-kol-email-drift`；与 BUG-010 同函数的担忧已核对：_upsert_task 中竞争吸收（begin_nested + IntegrityError）与终态守卫共存，test_dedup_races 随整合后全套 212 项测试通过 |
-| BUG-038 | KOL 删除接口外键级联 500 | `api/kol.py` 删除路径 | ✅已合并 | `99be094`：级联清理 + 入库字符串截断防线 + 容器启动自动迁移 |
-| BUG-039 | int/float 环境变量空串导致启动 crash | `config.py` | ✅已合并 | `15fc57d` |
-| BUG-040 | kol_email 数据漂移 + 邮箱规范化口径不统一 | 入库各路径 | ✅已合并 | `f23b273`；相关架构修复：`b34253b`（连接池+session-over-I/O §8）、`717b173`（snov 三阶段拆分） |
+| BUG-035 | ensure_kol_email 吞 IntegrityError 后外层 session 带着坏事务继续用 | `services/…ensure_kol_email` | ✅已部署 | `1641a5c`：SAVEPOINT（begin_nested）隔离，失败只回滚子事务 |
+| BUG-036 | enqueue_message_sync 对借用的外部 session 直接 commit，打穿调用方事务边界 | `services/feishu_push.py:786` | ✅已部署 | `ce53afe`：借用 session 只 flush，commit/rollback/close 归调用方 |
+| BUG-037 | 三处唯一约束上的查后插并发竞争：webhook 的 message_id、auto_reply 的 _upsert_task（source_message_id）、feishu 的 enqueue_message_sync（kol_id） | `api/webhook.py` `services/auto_reply.py` `services/feishu_push.py` | ✅已部署 | `518e8ca`，已经 `0b00d43` 并入 `fix/db-kol-email-drift`；与 BUG-010 同函数的担忧已核对：_upsert_task 中竞争吸收（begin_nested + IntegrityError）与终态守卫共存，test_dedup_races 随整合后全套 212 项测试通过 |
+| BUG-038 | KOL 删除接口外键级联 500 | `api/kol.py` 删除路径 | ✅已部署 | `99be094`：级联清理 + 入库字符串截断防线 + 容器启动自动迁移 |
+| BUG-039 | int/float 环境变量空串导致启动 crash | `config.py` | ✅已部署 | `15fc57d` |
+| BUG-040 | kol_email 数据漂移 + 邮箱规范化口径不统一 | 入库各路径 | ✅已部署 | `f23b273`；相关架构修复：`b34253b`（连接池+session-over-I/O §8）、`717b173`（snov 三阶段拆分） |
 
-> 批次 E 中「✅已合并」指已进 `fix/db-kol-email-drift` 主干；这些改动**生产尚未部署**，
-> 将随下一次整体部署上线（与批次 C 的 🚀待部署项同批走）。
+> 批次 E 全部改动已进 `fix/db-kol-email-drift` 主干，并于 2026-07-27 随部署
+> `20260727-f484c61` 与批次 C 同批上线。
 
 ## 已证伪（防止重复报告）
 
@@ -160,3 +156,4 @@ commit `04bd21c` 基线进入 `fix/db-kol-email-drift`（199 项测试通过）�
 | 2026-07-27 | 初版：收拢 7/26 诊断、7/26 安全、7/27 深度测试、7/27 飞书溯源、代码评审共 40 条 + 1 证伪 + 2 风险项；逐条核对工作区代码确认状态 |
 | 2026-07-27 | BUG-037 更正：`518e8ca` 已经 `0b00d43` 并入主干（_upsert_task 守卫共存核对无误），状态 🔀待合并 → 🚀待部署 |
 | 2026-07-27 | BUG-013（`031fce7`）、BUG-014（`dd2a05f`）并行修复完成，❌未修复 → 🚀待部署；合并 BUG-037 后的组合状态全套 216 项后端测试通过、前端 build 通过 |
+| 2026-07-27 | 生产部署 `20260727-f484c61`（源 = git f484c61，主干与 main 同点）：批次 C 全部、BUG-013/014/026/037 及批次 E 由 🚀待部署/已合并 → ✅已部署；验收全过，备份与回滚镜像齐备（pre-deploy-20260727-f484c61） |
