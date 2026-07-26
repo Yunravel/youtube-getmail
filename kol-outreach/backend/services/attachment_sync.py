@@ -90,8 +90,9 @@ def _find_matching_message(
 ) -> Optional[Message]:
     """在中台找与这封 IMAP 邮件对应的 inbound message。
 
-    匹配规则：from_email 一致 + subject 去前缀后包含 + 时间窗口 ±3 天。
-    返回最近的匹配；找不到返回 None。
+    匹配规则：from_email 一致 + 时间窗口 ±3 天 + subject 去前缀后一致或互相包含。
+    subject 非空但全对不上时返回 None（交由未匹配落库评估）；来信无主题时
+    取窗口内最近一封。找不到候选返回 None。
     """
     if not from_email:
         return None
@@ -113,7 +114,7 @@ def _find_matching_message(
     if not target_subject:
         return candidates[0]
 
-    # subject 精确匹配优先；否则取时间最近的
+    # subject 精确匹配优先
     for m in candidates:
         if _normalize_subject(m.subject or "") == target_subject:
             return m
@@ -122,7 +123,10 @@ def _find_matching_message(
         ms = _normalize_subject(m.subject or "")
         if ms and (ms in target_subject or target_subject in ms):
             return m
-    return candidates[0]  # 同发件人时间最近的，最可能是对的
+    # 主题全对不上：不能兜底取最近一封——同发件人换主题的新邮件会被错挂到
+    # 旧消息上，新回信从此不入库、附件也挂错（BUG-013）。返回 None，
+    # 让调用方走 _ingest_unmatched_email 的未匹配落库评估。
+    return None
 
 
 # ===== 未匹配真实回信落库（修复"Snov 收不到第三方地址回信"）=====

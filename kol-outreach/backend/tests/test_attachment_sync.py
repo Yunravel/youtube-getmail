@@ -154,6 +154,40 @@ class TestFindMatchingMessage(unittest.TestCase):
         )
         self.assertIsNotNone(m)
 
+    def test_different_subject_same_sender_not_matched(self):
+        # BUG-013 回归：同发件人在 ±3 天窗口内发来主题完全不同的新邮件，
+        # 不得兜底匹配到旧消息——否则新回信永远不入库、附件挂错。
+        # 必须返回 None，让调用方走未匹配落库评估。
+        m = _find_matching_message(
+            self.db,
+            from_email="partnership@daniel-dan.biz",
+            subject="Updated rates for Q4",
+            received_at=datetime(2026, 7, 15, 15, 0, 0),  # 旧消息 1 天后，窗口内
+        )
+        self.assertIsNone(m)
+
+    def test_same_subject_prefix_variants_still_match(self):
+        # 合法场景保底：主题一致、仅 Re:/Fwd: 前缀不同，仍要匹配得上。
+        m = _find_matching_message(
+            self.db,
+            from_email="partnership@daniel-dan.biz",
+            subject="Fwd: RE: ✨ Paid Collaboration Opportunity",
+            received_at=datetime(2026, 7, 14, 16, 0, 0),
+        )
+        self.assertIsNotNone(m)
+        self.assertEqual(m.id, self.msg.id)
+
+    def test_empty_subject_falls_back_to_latest(self):
+        # 来信无主题（没法比对）时保留取窗口内最近一封的兜底行为。
+        m = _find_matching_message(
+            self.db,
+            from_email="partnership@daniel-dan.biz",
+            subject="",
+            received_at=datetime(2026, 7, 14, 16, 0, 0),
+        )
+        self.assertIsNotNone(m)
+        self.assertEqual(m.id, self.msg.id)
+
     def test_imap_match_repairs_recipient_and_exact_duplicates(self):
         duplicate = Message(
             thread_id=self.msg.thread_id,
@@ -418,6 +452,47 @@ class TestIngestUnmatchedEmail(unittest.TestCase):
             self.known,
         )
         self.assertIsNone(message)
+
+    def test_new_subject_reply_from_known_sender_flows_to_ingest(self):
+        # BUG-013 回归（链路验证）：库里已有同发件人的旧回信，1 天后她发来
+        # 主题完全不同的新邮件——匹配函数不得把它挂到旧消息上（返回 None），
+        # 返回 None 后经引用链证据仍能走 _ingest_unmatched_email 落库为新 message。
+        original = self.db.query(Kol).filter(Kol.email == "prospect@example.com").one()
+        thread = self.db.query(Thread).filter(Thread.kol_id == original.id).one()
+        old_inbound = Message(
+            thread_id=thread.id,
+            direction="inbound",
+            from_email="nina@bossmgmtgrp.com",
+            to_email="cowanhelena588@gmail.com",
+            subject="Re: ✨ Paid YouTube Collaboration with Dola",
+            body_text="first reply",
+            message_id="snov:inbound-1",
+            rfc_message_id="first-reply@bossmgmtgrp.com",
+            received_at=datetime(2026, 7, 19, 10, 0, 0),
+        )
+        self.db.add(old_inbound)
+        self.db.commit()
+
+        fetched = _fetched(
+            subject="Updated rates for Q4",
+            message_id="new-topic@bossmgmtgrp.com",
+            in_reply_to="first-reply@bossmgmtgrp.com",
+            references="<first-reply@bossmgmtgrp.com>",
+            date=datetime(2026, 7, 20, 10, 0, 0),  # 旧回信 1 天后，窗口内
+        )
+        # 第一步：主题对不上 → 不得匹配到旧消息
+        self.assertIsNone(_find_matching_message(
+            self.db, fetched.from_email, fetched.subject, fetched.date
+        ))
+        # 第二步：未匹配落库评估把它作为新 message 落库（不覆盖旧消息）
+        message, _ = _ingest_unmatched_email(
+            self.db, fetched, "cowanhelena588@gmail.com", self.known
+        )
+        self.assertIsNotNone(message)
+        self.db.commit()
+        self.assertNotEqual(message.id, old_inbound.id)
+        self.assertEqual(message.subject, "Updated rates for Q4")
+        self.assertEqual(message.thread_id, thread.id)
 
 
 class TestFindKolByAnyEmail(unittest.TestCase):
