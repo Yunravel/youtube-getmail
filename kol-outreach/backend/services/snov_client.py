@@ -41,7 +41,7 @@ class SnovClient:
         payload = response.json()
         token = payload.get("access_token")
         if not token:
-            raise RuntimeError("Snov 未返回 access_token")
+            raise RuntimeError("营销平台未返回 access_token")
         self._token = token
         # Official tokens currently last one hour. Refresh one minute early.
         expires_in = int(payload.get("expires_in") or 3600)

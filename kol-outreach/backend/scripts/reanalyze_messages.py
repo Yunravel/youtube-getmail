@@ -27,6 +27,11 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="0 means all matching messages")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--force", action="store_true", help="also replace existing model results")
+    parser.add_argument(
+        "--missing-commercial-fields",
+        action="store_true",
+        help="only process rows missing the current commercial/tag analysis keys",
+    )
     args = parser.parse_args()
 
     db = SessionLocal()
@@ -39,6 +44,17 @@ def main() -> int:
     items = []
     for message in messages:
         analysis = message.ai_analysis or {}
+        if args.missing_commercial_fields and all(
+            key in analysis
+            for key in (
+                "collaboration_type",
+                "platform_rate",
+                "external_rate",
+                "complete_quote",
+                "creator_tags",
+            )
+        ):
+            continue
         if not args.force and analysis.get("analysis_source") == "model":
             continue
         items.append({
@@ -72,6 +88,10 @@ def main() -> int:
             message = db.query(Message).filter(Message.id == message_id).first()
             if not message:
                 continue
+            # AI 意向分析与画像/附件报价解析共享同一个 JSON 列。以旧数据为底、
+            # 新意向结果覆盖同名键，避免重分析时丢失 quote、deliverables、
+            # payment_terms、usage_rights、creator_niche 等其它管线写入的字段。
+            analysis = {**(message.ai_analysis or {}), **analysis}
             message.ai_analysis = analysis
             thread = message.thread
             if thread:

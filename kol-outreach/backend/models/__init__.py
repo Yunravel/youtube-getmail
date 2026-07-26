@@ -10,5 +10,8 @@ from models.thread import Thread
 from models.message import Message
 from models.note import Note
 from models.send_log import SendLog
+from models.auto_reply_template import AutoReplyTemplate
+from models.scheduled_reply import ScheduledReply
+from models.feishu_sync_task import FeishuSyncTask
 
-__all__ = ["Operator", "Kol", "KolCandidate", "CrawlerProduct", "MailboxCredential", "KolEmail", "ProjectAssessment", "Thread", "Message", "Note", "SendLog"]
+__all__ = ["Operator", "Kol", "KolCandidate", "CrawlerProduct", "MailboxCredential", "KolEmail", "ProjectAssessment", "Thread", "Message", "Note", "SendLog", "AutoReplyTemplate", "ScheduledReply", "FeishuSyncTask"]

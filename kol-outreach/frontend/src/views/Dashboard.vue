@@ -135,7 +135,7 @@ async function loadRates() {
   try {
     rates.value = { ...rates.value, ...(await statsApi.campaignRates(selectedProject.value)) }
   } catch (e) {
-    /* Snov 未配置或后端旧版，KPI 卡保持 0 */
+    /* 营销平台未配置或后端旧版，KPI 卡保持 0 */
   }
 }
 

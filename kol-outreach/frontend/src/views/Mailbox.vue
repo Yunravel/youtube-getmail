@@ -1,7 +1,7 @@
 <template>
   <div class="mailbox-page">
     <header class="mailbox-toolbar">
-      <a-tooltip :title="composeUrl ? '前往 Snov 新建邮件' : '请配置 VITE_SNOV_INBOX_URL'">
+      <a-tooltip :title="composeUrl ? '前往发信平台新建邮件' : '请配置发信平台收件箱地址'">
         <span class="compose-wrap">
           <a-button
             class="compose-button"

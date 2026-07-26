@@ -19,7 +19,10 @@ from models import (
 )
 from models.auto_reply_template import DEFAULT_BODY, DEFAULT_SUBJECT
 from services.quote_detection import detect_quote, extract_money_items, quote_summary
-from services.smtp_sender import AmbiguousDeliveryError, PreSendError, build_reply_message, send_message
+from services.smtp_sender import (
+    AmbiguousDeliveryError, PreSendError, SmtpCredentialSnapshot,
+    build_reply_message, send_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +133,11 @@ def _upsert_task(db: Session, message: Message, status: str, **values) -> Schedu
     if not task:
         task = ScheduledReply(thread_id=message.thread_id, source_message_id=message.id, status=status)
         db.add(task)
+    elif task.status in FINAL_STATUSES or task.status == "sending":
+        # 纵深防御：终态（FINAL_STATUSES）与投递中（sending）的任务不得被重评估
+        # 覆写/复活——sent 复活成 queued 会重复外发，cancelled 复活会违背运营取消。
+        # 业务级守卫在 evaluate_message_for_auto_reply，这里兜底，原样返回。
+        return task
     task.status = status
     for key, value in values.items():
         setattr(task, key, value)
@@ -174,6 +182,26 @@ def evaluate_message_for_auto_reply(message_id: int) -> ScheduledReply | None:
         analysis = dict(message.ai_analysis or {})
         analysis["quote"] = quote
         message.ai_analysis = analysis
+
+        # attachment_sync 会周期性对同一封邮件重跑 evaluate，任务只能在下列前提下被改写：
+        # - 终态（FINAL_STATUSES）与投递中（sending）的任务绝不复活/覆写：
+        #   sent 复活=重复外发，cancelled 复活=违背运营取消，sending 覆写=双发窗口。
+        # - 运营手动接管（edited_at 非空或 manual_override）的任务，draft_subject/
+        #   draft_body/scheduled_at/status 以运营为准，模板重渲染不得覆盖。
+        # 上面 quote 合并写入 message.ai_analysis 照旧提交，任务本身不动。
+        existing_task = db.query(ScheduledReply).filter(
+            ScheduledReply.source_message_id == message.id
+        ).first()
+        if existing_task and (
+            existing_task.status in FINAL_STATUSES
+            or existing_task.status == "sending"
+            or existing_task.manual_override
+            or existing_task.edited_at is not None
+        ):
+            db.commit()
+            db.refresh(existing_task)
+            return existing_task
+
         if not global_template.auto_send_enabled:
             db.commit()
             return None
@@ -210,6 +238,19 @@ def evaluate_message_for_auto_reply(message_id: int) -> ScheduledReply | None:
                 return task
             db.commit()
             return None
+
+        # received_at_estimated 表示 received_at 是入库时刻的推算值而非邮件真实时间
+        # （见 models/message.py）。两小时新鲜度窗口无从确认时，确认报价也不得自动
+        # 外发——宁可多进人工队列。
+        if message.received_at_estimated:
+            task = _upsert_task(
+                db, message, "manual_review", quote_snapshot=quote,
+                template_id=template.id, template_snapshot=_template_snapshot(template),
+                deadline_at=deadline,
+                error_message="收信时间为入库推算值，无法确认两小时新鲜度窗口，需人工确认后发送",
+            )
+            db.commit()
+            return task
 
         if quote["awaiting_attachment"]:
             task = _upsert_task(
@@ -334,7 +375,8 @@ def send_due_task(task_id: int) -> None:
     """发送一个到期的自动回复草稿。
 
     遵循 DATABASE_DEVELOPMENT.md §8：SMTP 发送不得在数据库 session 内进行。
-    流程：短事务完成前置校验并把 task 标记为 ``sending``（claim）→ 关闭 session →
+    流程：短事务完成前置校验并用条件 UPDATE 把 ``queued`` 原子改成 ``sending``
+    （claim，抢不到即放弃，防调度器与 send-now 双发）→ 关闭 session →
     调 SMTP send_message → 新短事务写发送结果。``sending`` 标记配合
     :func:`recover_interrupted_deliveries` 保证崩溃后可恢复（§8 line 469）。
     """
@@ -411,9 +453,20 @@ def send_due_task(task_id: int) -> None:
             "rfc_in_reply_to": source.rfc_message_id,
             "references": source.references or "",
         }
+        # 同理：commit（expire_on_commit=True）会让 credential 属性全部过期、close 后
+        # detached，SMTP 阶段再读会抛 DetachedInstanceError。先快照成纯对象。
+        smtp_credential = SmtpCredentialSnapshot.from_credential(credential)
 
-        task.status = "sending"
-        task.error_message = None
+        # 原子抢占（claim）：/tasks/{id}/send-now 的 BackgroundTask 与 30 秒调度器
+        # 可能同时通过上面的校验。条件 UPDATE 保证只有一方能把 queued 改成 sending
+        # （SQLite/PG 均原子）；rowcount 为 0 说明已被并发方抢走或状态已变，放弃发送。
+        claimed = db.query(ScheduledReply).filter(
+            ScheduledReply.id == task_id,
+            ScheduledReply.status == "queued",
+        ).update({"status": "sending", "error_message": None}, synchronize_session=False)
+        if not claimed:
+            db.rollback()
+            return
         db.commit()
     except Exception:
         db.rollback()
@@ -424,11 +477,18 @@ def send_due_task(task_id: int) -> None:
 
     # ============ SMTP 阶段（无 DB session）============
     try:
-        send_message(credential, email_message)
+        send_message(smtp_credential, email_message)
     except PreSendError as exc:
         _record_send_failure(task_id, exc, is_ambiguous=False)
         return
     except AmbiguousDeliveryError as exc:
+        _record_send_failure(task_id, exc, is_ambiguous=True)
+        return
+    except Exception as exc:
+        # 意外异常发生在 SMTP 交互期间，无法判断 DATA 是否已被服务器接收；
+        # 按保守哲学视为投递结果不确定：进 manual_review、不自动重试，
+        # 且不让异常逃出去打断 process_due_replies 的整批任务。
+        logger.exception("自动回复 SMTP 阶段意外异常 task=%s", task_id)
         _record_send_failure(task_id, exc, is_ambiguous=True)
         return
 
@@ -529,7 +589,11 @@ def process_due_replies() -> None:
     finally:
         db.close()
     for task_id in due_ids:
-        send_due_task(task_id)
+        try:
+            send_due_task(task_id)
+        except Exception:
+            # 双保险：单个任务的意外异常不允许打断整批，其余到期任务照常处理。
+            logger.exception("自动回复任务处理异常，继续批次内下一个 task=%s", task_id)
 
 
 def recover_interrupted_deliveries() -> None:

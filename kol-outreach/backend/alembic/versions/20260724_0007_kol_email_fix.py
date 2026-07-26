@@ -66,7 +66,7 @@ def upgrade() -> None:
     backfill_result = bind.execute(
         sa.text(
             "INSERT INTO kol_email (kol_id, email, email_normalized, is_primary, source, created_at) "
-            "SELECT k.id, k.email, lower(trim(k.email)), true, :src, now() "
+            "SELECT k.id, k.email, lower(trim(k.email)), true, :src, CURRENT_TIMESTAMP "
             "FROM kol k "
             "WHERE k.email IS NOT NULL AND trim(k.email) <> '' "
             "  AND NOT EXISTS (SELECT 1 FROM kol_email e WHERE e.kol_id = k.id)"

@@ -30,6 +30,9 @@ services:
       - ./backend/.env
     environment:
       DATABASE_URL: postgresql+psycopg2://kol:${POSTGRES_PASSWORD}@db:5432/kol_outreach
+      # 工作站永远不是生产:硬编码 local,即使 env_file 里混入生产飞书凭据,
+      # config 层的环境守卫也会拒绝写生产表(2026-07-27 本地覆盖生产行事故)。
+      APP_ENV: local
       DEBUG: "false"
       HOST: 0.0.0.0
       PORT: 8000
@@ -42,10 +45,19 @@ services:
       SNOV_CLIENT_SECRET: ${SNOV_CLIENT_SECRET:-}
       SNOV_SYNC_ENABLED: ${SNOV_SYNC_ENABLED:-true}
       SNOV_SYNC_INTERVAL_SECONDS: ${SNOV_SYNC_INTERVAL_SECONDS:-120}
+      IMAP_SYNC_ENABLED: ${IMAP_SYNC_ENABLED:-true}
+      IMAP_PROXY_ENABLED: ${IMAP_PROXY_ENABLED:-false}
+      IMAP_PROXY_HOST: ${IMAP_PROXY_HOST:-}
+      IMAP_PROXY_PORT: ${IMAP_PROXY_PORT:-}
+      SMTP_PROXY_ENABLED: ${SMTP_PROXY_ENABLED:-false}
+      SMTP_PROXY_HOST: ${SMTP_PROXY_HOST:-}
+      SMTP_PROXY_PORT: ${SMTP_PROXY_PORT:-}
+      AUTO_REPLY_POLL_SECONDS: ${AUTO_REPLY_POLL_SECONDS:-30}
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     volumes:
       - workstation-backend-logs:/app/logs
+      - workstation-backend-data:/app/data
 
   frontend:
     build:
@@ -65,3 +77,5 @@ volumes:
     name: kol-workstation-db-data
   workstation-backend-logs:
     name: kol-workstation-backend-logs
+  workstation-backend-data:
+    name: kol-workstation-backend-data

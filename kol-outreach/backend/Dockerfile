@@ -17,12 +17,19 @@ WORKDIR /app
 
 # 系统依赖(PostgreSQL 驱动需要)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc libpq-dev curl && rm -rf /var/lib/apt/lists/*
+    gcc libpq-dev curl tesseract-ocr tesseract-ocr-eng && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Dynamic public rate cards (for example Canva) require browser rendering.
+# Install Chromium and its Debian runtime dependencies in the production image.
+RUN python -m playwright install --with-deps chromium
 
 COPY . .
+
+# 入口脚本兜底归一换行符(仓库在 Windows 上开发,git 换行配置不可控,
+# CRLF 会让容器内 /bin/sh 解析失败);下方以 `sh` 显式调用,不依赖可执行位。
+RUN sed -i 's/\r$//' /app/docker-entrypoint.sh
 
 # 把 SHA 写到容器内,应用启动时读取 + 运维可 docker exec 直查
 #   - 文件存在性: build 阶段必生成,即使 ARG 没传,也会写入 "unknown"
@@ -41,5 +48,13 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# 建表仍使用 create_all；单 worker 避免首次启动时两个 worker 并发建表。
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# 启动入口:非 SQLite(生产 PostgreSQL)时先执行 `alembic upgrade head`,
+# 失败则容器启动失败(fail fast,不带病起服务);SQLite(本地/开发)跳过
+# 迁移,与旧行为完全一致。迁移成功后脚本内 exec CMD,uvicorn 仍是 PID 1。
+ENTRYPOINT ["sh", "/app/docker-entrypoint.sh"]
+
+# SQLite 场景建表仍使用 create_all；单 worker 避免首次启动时两个 worker 并发建表。
+# Snov authenticates webhooks with a query-string token. Uvicorn's access log
+# records the full request target, which would persist that secret in Docker
+# logs. Keep application/error logs, but disable raw HTTP access logging.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log"]

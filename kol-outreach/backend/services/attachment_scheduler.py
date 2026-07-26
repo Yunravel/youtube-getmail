@@ -1,4 +1,4 @@
-"""定时 IMAP 附件同步：每 10 分钟扫所有邮箱的未读邮件抓附件。
+"""定时 IMAP 附件同步：每 10 分钟扫描近两天邮件抓附件与 RFC 邮件头。
 
 补 Snov webhook 不传附件的缺口。手动触发（限定时间范围）走 api/attachments.py
 的 _sync_jobs，不走这里。
@@ -19,7 +19,10 @@ def _sync_job() -> None:
     from services.attachment_sync import sync_all_mailboxes
 
     try:
-        result = sync_all_mailboxes(mode="unread")
+        # Fetch recent mail regardless of \Seen. Operators commonly read a
+        # reply before the polling cycle, but RFC headers are still required
+        # for a correctly threaded automatic reply.
+        result = sync_all_mailboxes(mode="recent", since_days=2)
         logger.info(
             "IMAP 附件轮询完成: mailboxes=%s ok=%s failed=%s fetched=%s matched=%s attached=%s",
             result.get("mailboxes_total", 0),

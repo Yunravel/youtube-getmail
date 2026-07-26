@@ -1,7 +1,7 @@
 """Snov 集成管理接口（受看板登录保护）。"""
 import hashlib
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -151,16 +151,34 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _parse_snov_time(value: Any) -> datetime:
-    """把 Snov 的 receivedAt 转为数据库使用的 UTC naive datetime。"""
-    if isinstance(value, (int, float)):
-        return datetime.utcfromtimestamp(value)
-    if isinstance(value, str):
+def _parse_snov_time(value: Any) -> tuple[datetime, bool]:
+    """把 Snov 的 receivedAt 转为数据库使用的 UTC naive datetime。
+
+    返回 ``(received_at, estimated)``。estimated=True 表示 Snov 没给时间或
+    值解析不了，received_at 是入库时刻的推算值——历史补拉的旧回信会显示成
+    "刚刚"，消费端（自动回复新鲜度闸门）必须据此拒绝自动放行。
+
+    幂等键红线：``_historical_message_id`` 的指纹用的是原始 ``received_value``
+    字符串，本函数输出只进 received_at 列，两者互不影响。
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+            return datetime.utcfromtimestamp(value), False
+        except (OverflowError, OSError, ValueError):
+            pass
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             pass
-    return datetime.utcnow()
+        else:
+            if parsed.tzinfo is not None:
+                # 带偏移 → 换算到 UTC 再去 tzinfo；旧实现直接丢偏移导致
+                # +03:00 的 15 点被当成 UTC 15 点（实际 UTC 12 点）。
+                return parsed.astimezone(timezone.utc).replace(tzinfo=None), False
+            # 无偏移的 naive 串按 UTC 解释（Snov 的时间基准是 UTC）。
+            return parsed, False
+    return datetime.utcnow(), True
 
 
 def _historical_message_id(
@@ -273,6 +291,9 @@ def sync_historical_replies(db: Session = Depends(get_db)):
     created_message_ids: list[int] = []
     created_kol_ids: list[int] = []
     analysis_jobs: list[dict] = []  # 收集待 AI 分析任务，commit 前把 ORM 属性读出来
+    # 同一 KOL 先后发多封内容完全相同的回信（且 Snov 未给 receivedAt）会产生
+    # 相同指纹：按批内出现次序追加序号，避免第二封被误判为 duplicate 而丢失。
+    fingerprint_counts: dict[str, int] = {}
 
     try:
         for campaign_id, campaign_name, records in reply_batches:
@@ -347,28 +368,44 @@ def sync_historical_replies(db: Session = Depends(get_db)):
                         or record.get("senderEmail")
                         or record.get("sender_email")
                     ).lower()
-                    received_at = _parse_snov_time(received_value)
-                    message_id = _historical_message_id(
+                    received_at, received_at_estimated = _parse_snov_time(received_value)
+                    base_message_id = _historical_message_id(
                         campaign_id,
                         prospect_email,
                         subject,
                         body,
                         received_value,
                     )
+                    # 批内第 N 次出现同一指纹 → 追加序号，保证每封都有独立幂等键。
+                    occurrence = fingerprint_counts.get(base_message_id, 0)
+                    fingerprint_counts[base_message_id] = occurrence + 1
+                    message_id = (
+                        base_message_id
+                        if occurrence == 0
+                        else f"{base_message_id}#{occurrence}"
+                    )
                     # Snov 的 prospectId 每次读取都会变化，不能用于幂等键。旧版
                     # 导入过的数据则通过邮件内容与接收时间识别，兼容一次性补数据。
                     existing_message = db.query(Message).filter(
-                        or_(
-                            Message.message_id == message_id,
-                            (
-                                (Message.direction == "inbound")
-                                & (Message.from_email == prospect_email)
-                                & (Message.subject == subject)
-                                & (Message.body_text == body)
-                                & (Message.received_at == received_at)
-                            ),
-                        ),
+                        Message.message_id == message_id
                     ).first()
+                    if not existing_message:
+                        content_matches = (
+                            db.query(Message)
+                            .filter(
+                                Message.direction == "inbound",
+                                Message.from_email == prospect_email,
+                                Message.subject == subject,
+                                Message.body_text == body,
+                                Message.received_at == received_at,
+                            )
+                            .order_by(Message.id.asc())
+                            .all()
+                        )
+                        # 已入库的同内容消息数（可能来自 webhook 或旧版导入）多于
+                        # 本批中该指纹的出现序号时，说明"这一封"已存在。
+                        if len(content_matches) > occurrence:
+                            existing_message = content_matches[occurrence]
                     if existing_message:
                         if attachments and not existing_message.attachments:
                             existing_message.attachments = attachments
@@ -427,6 +464,7 @@ def sync_historical_replies(db: Session = Depends(get_db)):
                         attachments=attachments,
                         message_id=message_id,
                         received_at=received_at,
+                        received_at_estimated=received_at_estimated,
                     )
                     db.add(message)
                     db.flush()

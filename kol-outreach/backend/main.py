@@ -16,6 +16,8 @@ from api import api_router
 from services.snov_scheduler import start_snov_scheduler, stop_snov_scheduler
 from services.crawler_scheduler import start_crawler_scheduler, stop_crawler_scheduler
 from services.attachment_scheduler import start_attachment_scheduler, stop_attachment_scheduler
+from services.auto_reply_scheduler import start_auto_reply_scheduler, stop_auto_reply_scheduler
+from services.feishu_scheduler import start_feishu_scheduler, stop_feishu_scheduler
 
 # 日志
 logging.basicConfig(
@@ -73,7 +75,11 @@ async def lifespan(app: FastAPI):
     start_snov_scheduler()
     start_crawler_scheduler()
     start_attachment_scheduler()
+    start_auto_reply_scheduler()
+    start_feishu_scheduler()
     yield
+    stop_feishu_scheduler()
+    stop_auto_reply_scheduler()
     stop_snov_scheduler()
     stop_crawler_scheduler()
     stop_attachment_scheduler()

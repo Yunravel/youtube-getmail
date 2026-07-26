@@ -20,6 +20,11 @@ class MailboxCredential(Base):
     provider = Column(String(30), nullable=False, default="gmail")
     imap_host = Column(String(100), nullable=False, default="imap.gmail.com")
     imap_port = Column(Integer, nullable=False, default=993)
+    smtp_host = Column(String(100), nullable=False, default="smtp.gmail.com")
+    smtp_port = Column(Integer, nullable=False, default=465)
+    smtp_use_ssl = Column(Boolean, nullable=False, default=True)
+    smtp_verified_at = Column(DateTime, nullable=True)
+    smtp_last_error = Column(Text, nullable=True)
     # Snov 里的发信邮箱 id（import-from-snov 时回填，便于追溯）
     snov_id = Column(Integer, nullable=True)
     # 运行时状态（最近一次同步的结果，便于前端展示和排障）

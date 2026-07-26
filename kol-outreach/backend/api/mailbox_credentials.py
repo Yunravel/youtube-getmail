@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from db import get_db
-from models import MailboxCredential
+from models import MailboxCredential, ScheduledReply
 from services.crypto import encrypt_password, is_encryption_enabled
 
 router = APIRouter()
@@ -23,6 +23,11 @@ class CredentialOut(BaseModel):
     provider: str
     imap_host: str
     imap_port: int
+    smtp_host: str
+    smtp_port: int
+    smtp_use_ssl: bool
+    smtp_verified_at: Optional[datetime] = None
+    smtp_last_error: Optional[str] = None
     snov_id: Optional[int] = None
     has_password: bool
     last_synced_at: Optional[datetime] = None
@@ -40,6 +45,9 @@ class CredentialCreate(BaseModel):
     provider: str = "gmail"
     imap_host: str = "imap.gmail.com"
     imap_port: int = 993
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 465
+    smtp_use_ssl: bool = True
     enabled: bool = True
 
 
@@ -48,6 +56,9 @@ class CredentialUpdate(BaseModel):
     provider: Optional[str] = None
     imap_host: Optional[str] = None
     imap_port: Optional[int] = None
+    smtp_host: Optional[str] = None
+    smtp_port: Optional[int] = None
+    smtp_use_ssl: Optional[bool] = None
     enabled: Optional[bool] = None
 
 
@@ -58,6 +69,11 @@ def _to_out(cred: MailboxCredential) -> CredentialOut:
         provider=cred.provider,
         imap_host=cred.imap_host,
         imap_port=cred.imap_port,
+        smtp_host=cred.smtp_host,
+        smtp_port=cred.smtp_port,
+        smtp_use_ssl=cred.smtp_use_ssl,
+        smtp_verified_at=cred.smtp_verified_at,
+        smtp_last_error=cred.smtp_last_error,
         snov_id=cred.snov_id,
         has_password=bool(cred.encrypted_password),
         last_synced_at=cred.last_synced_at,
@@ -94,6 +110,9 @@ def create_credential(body: CredentialCreate, db: Session = Depends(get_db)):
         provider=body.provider,
         imap_host=body.imap_host,
         imap_port=body.imap_port,
+        smtp_host=body.smtp_host,
+        smtp_port=body.smtp_port,
+        smtp_use_ssl=body.smtp_use_ssl,
         enabled=body.enabled,
     )
     db.add(cred)
@@ -116,6 +135,19 @@ def update_credential(cred_id: int, body: CredentialUpdate, db: Session = Depend
         cred.imap_host = body.imap_host
     if body.imap_port is not None:
         cred.imap_port = body.imap_port
+    smtp_changed = False
+    if body.smtp_host is not None:
+        cred.smtp_host = body.smtp_host
+        smtp_changed = True
+    if body.smtp_port is not None:
+        cred.smtp_port = body.smtp_port
+        smtp_changed = True
+    if body.smtp_use_ssl is not None:
+        cred.smtp_use_ssl = body.smtp_use_ssl
+        smtp_changed = True
+    if smtp_changed or (body.password is not None and body.password.strip()):
+        cred.smtp_verified_at = None
+        cred.smtp_last_error = None
     if body.enabled is not None:
         cred.enabled = body.enabled
     db.commit()
@@ -123,11 +155,38 @@ def update_credential(cred_id: int, body: CredentialUpdate, db: Session = Depend
     return _to_out(cred)
 
 
+@router.post("/{cred_id}/test-smtp", response_model=CredentialOut)
+def test_smtp(cred_id: int, db: Session = Depends(get_db)):
+    """Authenticate and issue NOOP only; this endpoint never sends an email."""
+    cred = db.get(MailboxCredential, cred_id)
+    if not cred:
+        raise HTTPException(404, "凭据不存在")
+    from services.smtp_sender import test_smtp_connection
+    try:
+        test_smtp_connection(cred)
+        cred.smtp_verified_at = datetime.utcnow()
+        cred.smtp_last_error = None
+        db.commit()
+        db.refresh(cred)
+        return _to_out(cred)
+    except Exception as exc:
+        cred.smtp_verified_at = None
+        cred.smtp_last_error = str(exc)[:1000]
+        db.commit()
+        raise HTTPException(502, f"SMTP 测试失败: {exc}")
+
+
 @router.delete("/{cred_id}")
 def delete_credential(cred_id: int, db: Session = Depends(get_db)):
     cred = db.get(MailboxCredential, cred_id)
     if not cred:
         raise HTTPException(404, "凭据不存在")
+    # scheduled_reply.mailbox_credential_id 外键没有 ON DELETE 行为,生产 PG 上
+    # 只要有任务(含 sent/cancelled 终态)引用过该凭据,直接删就会被外键拒绝。
+    # 先把引用置 NULL 而不是删任务行:保留自动回复的审计历史。
+    db.query(ScheduledReply).filter(
+        ScheduledReply.mailbox_credential_id == cred_id
+    ).update({ScheduledReply.mailbox_credential_id: None}, synchronize_session=False)
     db.delete(cred)
     db.commit()
     return {"deleted": cred_id}
@@ -172,6 +231,9 @@ def import_from_provider(db: Session = Depends(get_db)):
             provider="gmail",
             imap_host="imap.gmail.com",
             imap_port=993,
+            smtp_host="smtp.gmail.com",
+            smtp_port=465,
+            smtp_use_ssl=True,
             snov_id=acc.get("id"),
             enabled=True,
         )

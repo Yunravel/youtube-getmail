@@ -35,3 +35,8 @@ test_kol.csv
 # IMAP 同步的附件文件（用户上传/抓取的 KOL 资料，含敏感内容不进仓库）
 backend/data/
 */data/attachments/
+
+# AI 会话工作区与部署产物,不入库
+.claude/
+.zcode/
+*.tar.gz

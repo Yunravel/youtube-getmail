@@ -12,11 +12,13 @@ socket.create_connection 让 imaplib.IMAP4_SSL 自动走 SOCKS5，无需子类�
 """
 from __future__ import annotations
 
+import calendar
 import email
 import email.utils
 import imaplib
 import logging
 import socket
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from email.header import decode_header
@@ -53,12 +55,17 @@ class FetchedEmail:
     """从 IMAP 拉取并解析好的一封邮件。"""
     uid: str
     message_id: str           # RFC 822 Message-ID 头
+    in_reply_to: str
+    references: str
     from_email: str           # 已小写归一
     from_name: str
     to_email: str
     subject: str
     date: Optional[datetime]
     attachments: list[EmailAttachment] = field(default_factory=list)
+    # 正文（用于把 Snov 未回传的第三方地址回信直接落库为中台消息）。
+    body_text: str = ""
+    body_html: str = ""
 
 
 class ImapMailbox:
@@ -110,17 +117,38 @@ class ImapMailbox:
 
     # ===== 连接 =====
     def connect(self) -> None:
-        """建立代理 socket + TLS + IMAP 登录。失败抛异常带邮箱名。"""
-        if settings.IMAP_PROXY_ENABLED:
-            self._install_proxy()
-        try:
-            self._imap = imaplib.IMAP4_SSL(self.imap_host, self.imap_port)
-            self._imap.login(self.email_addr, self.password)
-        except Exception as e:
-            raise RuntimeError(f"IMAP 连接/登录失败 [{self.email_addr}]: {e}") from e
-        finally:
-            # 只在建立连接阶段 patch；连接已建好后恢复，避免影响其他网络代码
-            self._restore_socket()
+        """建立代理 socket + TLS + IMAP 登录。失败抛异常带邮箱名。
+
+        代理链路（Clash 等）偶发 ``SSL EOF`` / ``socket error`` 断连，属于瞬时
+        故障：这里按 IMAP_CONNECT_RETRIES 做指数退避重试，避免整个邮箱本轮
+        同步直接失败（日志中多个 Gmail 邮箱因此丢过附件抓取）。
+        """
+        attempts = max(1, settings.IMAP_CONNECT_RETRIES)
+        delay = max(0.5, settings.IMAP_CONNECT_RETRY_DELAY_SECONDS)
+        last_error: Optional[Exception] = None
+        for attempt in range(1, attempts + 1):
+            if settings.IMAP_PROXY_ENABLED:
+                self._install_proxy()
+            try:
+                self._imap = imaplib.IMAP4_SSL(self.imap_host, self.imap_port)
+                self._imap.login(self.email_addr, self.password)
+                return
+            except Exception as e:
+                last_error = e
+                self._imap = None
+                if attempt < attempts:
+                    wait = delay * attempt
+                    logger.warning(
+                        "IMAP 连接失败（第 %d/%d 次） [%s]: %s；%.0f 秒后重试",
+                        attempt, attempts, self.email_addr, e, wait,
+                    )
+                    time.sleep(wait)
+            finally:
+                # 只在建立连接阶段 patch；连接已建好后恢复，避免影响其他网络代码
+                self._restore_socket()
+        raise RuntimeError(
+            f"IMAP 连接/登录失败 [{self.email_addr}]: {last_error}"
+        ) from last_error
 
     def close(self) -> None:
         if self._imap:
@@ -188,19 +216,26 @@ class ImapMailbox:
         to_email = self._parse_address(msg.get("To", ""))[1]
         subject = _decode_header(msg.get("Subject", ""))
         message_id = (msg.get("Message-ID") or "").strip().strip("<>")
+        in_reply_to = (msg.get("In-Reply-To") or "").strip().strip("<>")
+        references = (msg.get("References") or "").strip()
         date = self._parse_date(msg.get("Date"))
 
         attachments = self._extract_attachments(msg)
+        body_text, body_html = self._extract_body(msg)
 
         return FetchedEmail(
             uid=uid.decode(),
             message_id=message_id,
+            in_reply_to=in_reply_to,
+            references=references,
             from_email=from_email.lower(),
             from_name=from_name,
             to_email=to_email.lower(),
             subject=subject,
             date=date,
             attachments=attachments,
+            body_text=body_text,
+            body_html=body_html,
         )
 
     # ===== 标记已读 =====
@@ -228,15 +263,50 @@ class ImapMailbox:
 
     @staticmethod
     def _parse_date(raw: Optional[str]) -> Optional[datetime]:
+        """解析 Date 头为 naive UTC；解析失败返回 None（调用方按缺失处理）。
+
+        Date 头没带时区信息时按 UTC 解释：``mktime_tz`` 对无时区的 10 元组
+        会用机器本地时区换算，UTC+8 的 Windows 工作站会偏 8 小时。
+        """
         if not raw:
             return None
         try:
             tup = email.utils.parsedate_tz(raw)
             if not tup:
                 return None
+            if tup[9] is None:
+                return datetime.utcfromtimestamp(calendar.timegm(tup[:9]))
             return datetime.utcfromtimestamp(email.utils.mktime_tz(tup))
         except Exception:
             return None
+
+    @staticmethod
+    def _extract_body(msg) -> tuple[str, str]:
+        """提取正文，返回 ``(text, html)``。跳过附件部分，优先 text/plain。"""
+        text_parts: list[str] = []
+        html_parts: list[str] = []
+        for part in msg.walk():
+            if part.get_content_disposition() == "attachment":
+                continue
+            ctype = part.get_content_type()
+            if ctype not in ("text/plain", "text/html"):
+                continue
+            try:
+                payload = part.get_payload(decode=True)
+            except Exception:
+                continue
+            if payload is None:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                content = payload.decode(charset, errors="replace")
+            except LookupError:
+                content = payload.decode("utf-8", errors="replace")
+            if ctype == "text/plain":
+                text_parts.append(content)
+            else:
+                html_parts.append(content)
+        return "\n".join(text_parts).strip(), "\n".join(html_parts).strip()
 
     @staticmethod
     def _extract_attachments(msg) -> list[EmailAttachment]:

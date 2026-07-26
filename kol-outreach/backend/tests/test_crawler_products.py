@@ -92,7 +92,10 @@ class CrawlerProductsTest(unittest.TestCase):
         self.assertTrue(result["job_id"])
         task = background.tasks[0]
         self.assertEqual(task.args[1], ["Future Tool"])
-        self.assertEqual(task.args[-1], {"Future Tool": ["future creator tool"]})
+        # args 顺序：job_id, products, enable_enrich, enable_email, custom_queries,
+        # enable_deep_email, custom_product_terms, enable_scrape_creators
+        self.assertEqual(task.args[6], {"Future Tool": ["future creator tool"]})
+        self.assertEqual(task.args[7], False)  # enable_scrape_creators 默认 False
 
         queries = make_queries(
             ["Future Tool"], {"Future Tool": ["future creator tool"]}

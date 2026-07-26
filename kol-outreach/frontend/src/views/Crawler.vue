@@ -67,9 +67,13 @@
             <a-checkbox v-model:checked="enableDeepEmail" :disabled="running || !enableEmail">
               官网深度邮箱（慢，需 Playwright + 代理）
             </a-checkbox>
+            <a-checkbox v-model:checked="enableScrapeCreators" :disabled="running">
+              ScrapeCreators 抓取（YouTube/TikTok/IG，按 API 计费）
+            </a-checkbox>
           </a-space>
           <div style="color: #999; font-size: 12px; margin-top: 4px">
             深度邮箱：跟进 about 里的官网链接，用浏览器渲染抓 /contact 页邮箱。默认关。
+            ScrapeCreators：第三方 API 端到端抓取 profile（粉丝/邮箱/国家），需先配 SCRAPECREATORS_API_KEY。
           </div>
         </a-form-item>
 
@@ -218,6 +222,7 @@ const customQueriesText = ref('')
 const enableEnrich = ref(true)
 const enableEmail = ref(true)
 const enableDeepEmail = ref(false)
+const enableScrapeCreators = ref(false)
 const showProductModal = ref(false)
 const savingProduct = ref(false)
 const editingProduct = ref(null)
@@ -251,6 +256,7 @@ let statusTimer = null
 const phaseMap = {
   queued: '排队中',
   discovery: '发现频道',
+  scrapecreators: 'ScrapeCreators 抓取',
   enrich: '抓取 about + 扩展 + 邮箱',
   mx: 'MX 校验',
 }
@@ -341,6 +347,7 @@ async function start() {
       enableEnrich: enableEnrich.value,
       enableEmail: enableEmail.value,
       enableDeepEmail: enableDeepEmail.value,
+      enableScrapeCreators: enableScrapeCreators.value,
       customQueries: customQueries.value,
     })
     const desc = selectedProducts.value.length && customQueries.value.length

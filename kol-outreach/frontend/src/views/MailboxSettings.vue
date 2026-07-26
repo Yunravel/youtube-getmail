@@ -46,6 +46,13 @@
               @change="val => toggleEnabled(record, val)"
             />
           </template>
+          <template v-else-if="column.key === 'smtp_status'">
+            <a-tooltip v-if="record.smtp_last_error" :title="record.smtp_last_error">
+              <a-tag color="red">测试失败</a-tag>
+            </a-tooltip>
+            <a-tag v-else-if="record.smtp_verified_at" color="green">已验证</a-tag>
+            <a-tag v-else color="orange">未测试</a-tag>
+          </template>
           <template v-else-if="column.key === 'sync_status'">
             <a-tooltip v-if="record.last_error" :title="record.last_error">
               <a-tag color="red">{{ record.last_sync_status || '失败' }}</a-tag>
@@ -60,6 +67,7 @@
           </template>
           <template v-else-if="column.key === 'action'">
             <a-button type="link" size="small" @click="openModal(record)">编辑</a-button>
+            <a-button type="link" size="small" :loading="testingSmtpId === record.id" @click="testSmtp(record)">测试 SMTP</a-button>
             <a-popconfirm
               title="确定删除这个邮箱凭据吗？"
               ok-text="删除"
@@ -106,16 +114,17 @@
           </div>
         </div>
         <div v-if="syncJob.status === 'done' && syncJob.result" style="margin-top: 8px">
-          <a-descriptions size="small" :column="4" bordered>
+          <a-descriptions size="small" :column="5" bordered>
             <a-descriptions-item label="邮箱">{{ syncJob.result.mailboxes_ok }}/{{ syncJob.result.mailboxes_total }} 成功</a-descriptions-item>
             <a-descriptions-item label="抓取邮件">{{ syncJob.result.fetched }}</a-descriptions-item>
             <a-descriptions-item label="匹配会话">{{ syncJob.result.matched }}</a-descriptions-item>
             <a-descriptions-item label="下载附件">{{ syncJob.result.attached }}</a-descriptions-item>
+            <a-descriptions-item label="修复收件邮箱">{{ syncJob.result.repaired_recipients || 0 }}</a-descriptions-item>
           </a-descriptions>
         </div>
       </div>
       <div style="color: #999; font-size: 12px; margin-top: 8px">
-        定时轮询（每 10 分钟）会自动同步所有启用邮箱的未读邮件；这里手动触发用于补抓历史或重试。
+        定时轮询（每 10 分钟）会扫描所有启用邮箱近两天的邮件，不会因邮件已读而漏掉；这里手动触发用于补抓历史或重试。
       </div>
     </a-card>
 
@@ -152,6 +161,23 @@
           <a-input v-model:value="form.imap_host" :disabled="saving" />
           <div style="color: #999; font-size: 12px">Gmail 固定 imap.gmail.com，端口 993，一般无需改。</div>
         </a-form-item>
+        <a-row :gutter="12">
+          <a-col :span="14">
+            <a-form-item label="SMTP 服务器">
+              <a-input v-model:value="form.smtp_host" :disabled="saving" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="6">
+            <a-form-item label="端口">
+              <a-input-number v-model:value="form.smtp_port" :min="1" :max="65535" style="width: 100%" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="4">
+            <a-form-item label="SSL">
+              <a-switch v-model:checked="form.smtp_use_ssl" />
+            </a-form-item>
+          </a-col>
+        </a-row>
       </a-form>
     </a-modal>
   </div>
@@ -172,15 +198,17 @@ const credentials = ref([])
 const loading = ref(false)
 const encryptionEnabled = ref(false)
 const importing = ref(false)
+const testingSmtpId = ref(null)
 
 const withPasswordCount = computed(() => credentials.value.filter(c => c.has_password).length)
 
 const columns = [
   { title: '邮箱', dataIndex: 'email', key: 'email', ellipsis: true },
   { title: '密码', key: 'password', width: 90 },
+  { title: 'SMTP', key: 'smtp_status', width: 100 },
   { title: '同步状态', key: 'sync_status', width: 130 },
   { title: '启用', key: 'enabled', width: 70 },
-  { title: '操作', key: 'action', width: 130 },
+  { title: '操作', key: 'action', width: 220 },
 ]
 
 async function load() {
@@ -219,7 +247,10 @@ async function importFromProvider() {
 const showModal = ref(false)
 const editingCred = ref(null)
 const saving = ref(false)
-const form = ref({ email: '', password: '', imap_host: 'imap.gmail.com' })
+const form = ref({
+  email: '', password: '', imap_host: 'imap.gmail.com',
+  smtp_host: 'smtp.gmail.com', smtp_port: 465, smtp_use_ssl: true,
+})
 
 function openModal(cred = null) {
   editingCred.value = cred
@@ -227,6 +258,9 @@ function openModal(cred = null) {
     email: cred ? cred.email : '',
     password: '',
     imap_host: cred ? cred.imap_host : 'imap.gmail.com',
+    smtp_host: cred ? cred.smtp_host : 'smtp.gmail.com',
+    smtp_port: cred ? cred.smtp_port : 465,
+    smtp_use_ssl: cred ? cred.smtp_use_ssl : true,
   }
   showModal.value = true
 }
@@ -243,7 +277,12 @@ async function saveCred() {
   saving.value = true
   try {
     if (editingCred.value) {
-      const data = { imap_host: form.value.imap_host }
+      const data = {
+        imap_host: form.value.imap_host,
+        smtp_host: form.value.smtp_host,
+        smtp_port: form.value.smtp_port,
+        smtp_use_ssl: form.value.smtp_use_ssl,
+      }
       if (form.value.password) data.password = form.value.password
       await mailboxCredentialApi.update(editingCred.value.id, data)
       antMessage.success('已更新')
@@ -252,6 +291,9 @@ async function saveCred() {
         email: form.value.email,
         password: form.value.password,
         imap_host: form.value.imap_host,
+        smtp_host: form.value.smtp_host,
+        smtp_port: form.value.smtp_port,
+        smtp_use_ssl: form.value.smtp_use_ssl,
       })
       antMessage.success('已新增')
     }
@@ -261,6 +303,20 @@ async function saveCred() {
     antMessage.error(e.response?.data?.detail || '保存失败')
   } finally {
     saving.value = false
+  }
+}
+
+async function testSmtp(record) {
+  testingSmtpId.value = record.id
+  try {
+    await mailboxCredentialApi.testSmtp(record.id)
+    antMessage.success(`${record.email} SMTP 验证成功（未发送邮件）`)
+    await load()
+  } catch (e) {
+    antMessage.error(e.response?.data?.detail || 'SMTP 测试失败')
+    await load()
+  } finally {
+    testingSmtpId.value = null
   }
 }
 

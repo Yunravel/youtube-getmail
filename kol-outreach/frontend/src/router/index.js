@@ -56,6 +56,12 @@ const routes = [
         meta: { title: '邮箱配置' },
       },
       {
+        path: 'auto-replies',
+        name: 'AutoReplySettings',
+        component: () => import('../views/AutoReplySettings.vue'),
+        meta: { title: '自动回复' },
+      },
+      {
         path: 'stats',
         name: 'Stats',
         component: () => import('../views/Stats.vue'),

@@ -101,3 +101,32 @@ def ensure_kol_email(
     except Exception as exc:  # noqa: BLE001 - 邮箱同步失败不应阻塞 KOL 创建
         logger.warning("ensure_kol_email 失败 kol_id=%s email=%r: %s", kol_id, email, exc)
         return None
+
+
+def find_kol_by_any_email(db: "Session", email: Optional[str]) -> Optional["Kol"]:
+    """按邮箱定位 KOL：先查主表 ``kol.email``，再查 ``kol_email`` 别名表。
+
+    回信建档前必须用本函数而不是裸查 ``kol.email``——达人换邮箱/经纪人代回时，
+    新地址往往已作为别名挂在原 KOL 下；漏查别名表就会为同一达人重复建裸档
+    （2026-07-27 排查：Abhishek hey@/hi@ 双档即此因，见 kol 2415→172 归并）。
+    别名命中多个 KOL 时优先主邮箱行、再取最早建档的，保证结果确定。
+    """
+    from sqlalchemy import func
+
+    from models.kol import Kol
+
+    normalized = normalize_email(email)
+    if _is_blank(normalized):
+        return None
+    kol = db.query(Kol).filter(func.lower(Kol.email) == normalized).first()
+    if kol is not None:
+        return kol
+    alias = (
+        db.query(KolEmail)
+        .filter(KolEmail.email_normalized == normalized)
+        .order_by(KolEmail.is_primary.desc(), KolEmail.kol_id.asc())
+        .first()
+    )
+    if alias is not None:
+        return db.get(Kol, alias.kol_id)
+    return None

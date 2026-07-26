@@ -43,6 +43,9 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql+psycopg2://kol:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.prod}@db:5432/kol_outreach
+      # 环境标识:非 production 环境飞书写入被 config 层直接禁用(单一写入方保证)。
+      # 生产 compose 硬编码,不走变量——.env.prod 漏配也不会退化成 local。
+      - APP_ENV=production
       - DEBUG=false
       - HOST=0.0.0.0
       - PORT=8000
@@ -51,6 +54,9 @@ services:
       - OPENAI_MODEL_INTENT=${OPENAI_MODEL_INTENT:-gpt-4o-mini}
       - OPENAI_MODEL_PERSONALIZE=${OPENAI_MODEL_PERSONALIZE:-gpt-4o}
       - SNOV_WEBHOOK_TOKEN=${SNOV_WEBHOOK_TOKEN:?Set SNOV_WEBHOOK_TOKEN in .env.prod}
+      # 看板 Basic Auth(2026-07-26 新增;缺失则 compose 启动即报错,防止 503 裸奔两难)
+      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME:?Set DASHBOARD_USERNAME in .env.prod}
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:?Set DASHBOARD_PASSWORD in .env.prod}
       - SNOV_CLIENT_ID=${SNOV_CLIENT_ID:-}
       - SNOV_CLIENT_SECRET=${SNOV_CLIENT_SECRET:-}
       - CRAWLER_TOKEN=${CRAWLER_TOKEN:?Set CRAWLER_TOKEN in .env.prod}
@@ -61,10 +67,25 @@ services:
       - IMAP_PROXY_ENABLED=${IMAP_PROXY_ENABLED:-false}
       - IMAP_PROXY_HOST=${IMAP_PROXY_HOST:-}
       - IMAP_PROXY_PORT=${IMAP_PROXY_PORT:-}
+      - SMTP_PROXY_ENABLED=${SMTP_PROXY_ENABLED:-false}
+      - SMTP_PROXY_HOST=${SMTP_PROXY_HOST:-}
+      - SMTP_PROXY_PORT=${SMTP_PROXY_PORT:-}
+      - AUTO_REPLY_POLL_SECONDS=${AUTO_REPLY_POLL_SECONDS:-30}
       - ATTACHMENT_STORAGE_DIR=${ATTACHMENT_STORAGE_DIR:-/app/data/attachments}
       - ATTACHMENT_MASTER_KEY=${ATTACHMENT_MASTER_KEY:?Set ATTACHMENT_MASTER_KEY in .env.prod}
+      # 飞书电子表格回信同步(2026-07-24 新增)
+      - FEISHU_ENABLE=${FEISHU_ENABLE:-false}
+      - FEISHU_APP_ID=${FEISHU_APP_ID:-}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET:-}
+      - FEISHU_API_BASE=${FEISHU_API_BASE:-https://open.feishu.cn/open-apis}
+      - FEISHU_SPREADSHEET_TOKEN=${FEISHU_SPREADSHEET_TOKEN:-}
+      - FEISHU_SHEET_ID=${FEISHU_SHEET_ID:-}
+      - FEISHU_SYNC_INTERVAL_SECONDS=${FEISHU_SYNC_INTERVAL_SECONDS:-60}
+      - FEISHU_RECONCILE_INTERVAL_SECONDS=${FEISHU_RECONCILE_INTERVAL_SECONDS:-1800}
     expose:
       - "8000"
+    volumes:
+      - backend-data:/app/data
     networks:
       - kol-net
 
@@ -133,6 +154,7 @@ volumes:
   caddy-data:
   caddy-config:
   traefik-data:
+  backend-data:
 
 networks:
   kol-net:

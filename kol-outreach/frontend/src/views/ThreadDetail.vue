@@ -144,13 +144,83 @@
           </div>
         </a-card>
 
-        <a-alert
-          class="manual-reply-alert"
-          type="info"
-          show-icon
-          message="请在发信系统中人工回复"
-          description="这里用于查看联系人、邮箱和完整回信；实际回复仍在发信系统内完成。"
-        />
+        <a-card class="auto-reply-card" title="邮件回复" :bordered="false">
+          <a-alert
+            v-if="!replyTask"
+            type="info"
+            message="手动回复"
+            description="填写内容后可立即发送，或指定 30 天内的发送时间。邮件会从原收件邮箱发出并保持在原会话中。"
+            show-icon
+            style="margin-bottom: 12px"
+          />
+          <template v-if="replyTask">
+            <a-space wrap style="margin-bottom: 12px">
+              <a-tag :color="taskStatusColor(replyTask.status)">{{ taskStatusLabel(replyTask.status) }}</a-tag>
+              <span v-if="replyTask.scheduled_at">计划发送：{{ fmtTime(replyTask.scheduled_at) }}</span>
+              <span v-if="replyTask.status === 'queued'">（{{ countdownText }}）</span>
+            </a-space>
+            <a-alert
+              v-if="replyTask.error_message"
+              :type="replyTask.status === 'manual_review' || replyTask.status === 'failed' ? 'warning' : 'info'"
+              :message="replyTask.error_message"
+              show-icon
+              style="margin-bottom: 12px"
+            />
+            <div v-if="replyTask.quote?.items?.length" class="task-quote-list">
+              <b>识别到的报价</b>
+              <div v-for="(item, index) in replyTask.quote.items" :key="index">
+                {{ item.currency }} {{ Number(item.amount).toLocaleString() }} · {{ item.evidence }}
+              </div>
+            </div>
+          </template>
+          <a-form layout="vertical" style="margin-top: 12px">
+            <a-form-item label="回复主题">
+              <a-input v-model:value="draftSubject" :disabled="!canComposeReply" @update:value="draftDirty = true" />
+            </a-form-item>
+            <a-form-item label="回复正文">
+              <a-textarea
+                v-model:value="draftBody"
+                :rows="10"
+                :disabled="!canComposeReply"
+                placeholder="输入要发送给联系人的回复内容"
+                @update:value="draftDirty = true"
+              />
+            </a-form-item>
+          </a-form>
+          <a-space v-if="canComposeReply" wrap>
+            <a-button
+              v-if="replyTask?.status === 'queued'"
+              type="primary"
+              :loading="savingDraft"
+              @click="saveDraft"
+            >保存草稿</a-button>
+            <a-date-picker
+              v-model:value="specifiedSendAt"
+              show-time
+              format="YYYY-MM-DD HH:mm"
+              :allow-clear="false"
+              style="width: 190px"
+            />
+            <a-button :loading="schedulingReply" @click="scheduleReply">指定时间发送</a-button>
+            <a-popconfirm title="确定立即发送这封回复吗？" @confirm="sendReplyNow">
+              <a-button type="primary" danger :loading="sendingNow">立即发送</a-button>
+            </a-popconfirm>
+            <a-popconfirm
+              v-if="['queued', 'awaiting_attachment'].includes(replyTask?.status)"
+              title="确定取消这封自动回复吗？"
+              @confirm="cancelReply"
+            >
+              <a-button danger :loading="cancellingReply">取消自动回复</a-button>
+            </a-popconfirm>
+          </a-space>
+          <a-alert
+            v-else-if="replyTask"
+            type="info"
+            message="当前任务不可编辑"
+            description="已发送、发送中或已结束的任务会保留审计记录。收到新的入站邮件后可再次手动回复。"
+            show-icon
+          />
+        </a-card>
       </a-col>
 
       <a-col :xs="24" :xl="8">
@@ -237,7 +307,7 @@ import {
 } from '@ant-design/icons-vue'
 import dayjs from 'dayjs'
 import { useRoute } from 'vue-router'
-import { threadApi, operatorApi } from '../api'
+import { threadApi, operatorApi, autoReplyApi } from '../api'
 
 const route = useRoute()
 const backTarget = computed(() => route.query.from === 'mailbox' ? '/mailbox' : '/hot-leads')
@@ -247,7 +317,18 @@ const thread = ref(null)
 const operators = ref([])
 const assigneeId = ref(null)
 const noteBody = ref('')
+const replyTask = ref(null)
+const draftSubject = ref('')
+const draftBody = ref('')
+const draftDirty = ref(false)
+const savingDraft = ref(false)
+const cancellingReply = ref(false)
+const schedulingReply = ref(false)
+const sendingNow = ref(false)
+const specifiedSendAt = ref(null)
+const now = ref(dayjs())
 let refreshTimer = null
+let countdownTimer = null
 
 const latestBudget = computed(() => {
   const messages = thread.value?.messages || []
@@ -261,9 +342,157 @@ const latestBudget = computed(() => {
   return ''
 })
 
+const canComposeReply = computed(() =>
+  !replyTask.value || !['sent', 'sending'].includes(replyTask.value.status)
+)
+
+function latestInboundMessage(detail = thread.value) {
+  const messages = detail?.messages || []
+  return [...messages].reverse().find((item) => item.direction === 'inbound') || null
+}
+
+function defaultReplySubject(detail = thread.value) {
+  const original = latestInboundMessage(detail)?.subject || detail?.thread?.subject || 'Collaboration'
+  return /^\s*re\s*:/i.test(original) ? original : `Re: ${original}`
+}
+
 async function load() {
-  thread.value = await threadApi.detail(threadId)
+  const [detail, task] = await Promise.all([
+    threadApi.detail(threadId),
+    autoReplyApi.threadTask(threadId),
+  ])
+  thread.value = detail
+  const taskChanged = replyTask.value?.id !== task?.id
+  replyTask.value = task
+  if (taskChanged || !draftDirty.value) {
+    draftSubject.value = task?.draft_subject || defaultReplySubject(detail)
+    draftBody.value = task?.draft_body || ''
+    draftDirty.value = false
+  }
+  if (taskChanged || !specifiedSendAt.value) {
+    specifiedSendAt.value = task?.scheduled_at ? dayjs(task.scheduled_at) : dayjs().add(5, 'minute')
+  }
   assigneeId.value = thread.value.thread.assignee_id
+}
+
+const countdownText = computed(() => {
+  if (!replyTask.value?.scheduled_at) return ''
+  const seconds = Math.max(0, dayjs(replyTask.value.scheduled_at).diff(now.value, 'second'))
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const secs = seconds % 60
+  return `${hours ? `${hours} 小时 ` : ''}${minutes} 分 ${secs} 秒后`
+})
+
+function taskStatusLabel(status) {
+  return {
+    awaiting_attachment: '等待附件/邮件头', queued: '已排队', sending: '发送中',
+    sent: '已发送', cancelled: '已取消', superseded: '已被新邮件取代',
+    manual_review: '需人工处理', failed: '发送失败',
+  }[status] || status
+}
+
+function taskStatusColor(status) {
+  return {
+    queued: 'blue', sending: 'processing', sent: 'green', awaiting_attachment: 'orange',
+    manual_review: 'orange', failed: 'red', cancelled: 'default', superseded: 'default',
+  }[status] || 'default'
+}
+
+async function saveDraft() {
+  savingDraft.value = true
+  try {
+    replyTask.value = await autoReplyApi.updateDraft(replyTask.value.id, draftSubject.value, draftBody.value)
+    draftDirty.value = false
+    message.success('自动回复草稿已保存')
+  } catch (error) {
+    message.error(error.response?.data?.detail || '草稿保存失败')
+  } finally {
+    savingDraft.value = false
+  }
+}
+
+async function cancelReply() {
+  cancellingReply.value = true
+  try {
+    replyTask.value = await autoReplyApi.cancelTask(replyTask.value.id)
+    draftDirty.value = false
+    message.success('自动回复已取消')
+  } catch (error) {
+    message.error(error.response?.data?.detail || '取消失败')
+  } finally {
+    cancellingReply.value = false
+  }
+}
+
+async function scheduleReply() {
+  if (!specifiedSendAt.value) {
+    message.warning('请选择发送时间')
+    return
+  }
+  schedulingReply.value = true
+  try {
+    if (!draftSubject.value.trim() || !draftBody.value.trim()) {
+      message.warning('请填写回复主题和正文')
+      return
+    }
+    if (!replyTask.value || replyTask.value.status !== 'queued') {
+      replyTask.value = await autoReplyApi.createManual(
+        threadId, draftSubject.value, draftBody.value,
+        { scheduledAt: specifiedSendAt.value.toISOString() },
+      )
+      draftDirty.value = false
+      message.success('手动回信已按指定时间排队')
+      return
+    }
+    if (draftDirty.value) {
+      replyTask.value = await autoReplyApi.updateDraft(
+        replyTask.value.id, draftSubject.value, draftBody.value,
+      )
+      draftDirty.value = false
+    }
+    replyTask.value = await autoReplyApi.scheduleTask(
+      replyTask.value.id,
+      specifiedSendAt.value.toISOString(),
+    )
+    message.success('发送时间已更新')
+  } catch (error) {
+    message.error(error.response?.data?.detail || '指定发送时间失败')
+  } finally {
+    schedulingReply.value = false
+  }
+}
+
+async function sendReplyNow() {
+  sendingNow.value = true
+  try {
+    if (!draftSubject.value.trim() || !draftBody.value.trim()) {
+      message.warning('请填写回复主题和正文')
+      return
+    }
+    if (!replyTask.value || replyTask.value.status !== 'queued') {
+      replyTask.value = await autoReplyApi.createManual(
+        threadId, draftSubject.value, draftBody.value, { sendNow: true },
+      )
+      draftDirty.value = false
+      message.success('手动回信已立即提交发送')
+      window.setTimeout(load, 1500)
+      return
+    }
+    if (draftDirty.value) {
+      replyTask.value = await autoReplyApi.updateDraft(
+        replyTask.value.id, draftSubject.value, draftBody.value,
+      )
+      draftDirty.value = false
+    }
+    replyTask.value = await autoReplyApi.sendNow(replyTask.value.id)
+    message.success('发送任务已立即提交')
+    window.setTimeout(load, 1500)
+  } catch (error) {
+    message.error(error.response?.data?.detail || '立即发送失败')
+  } finally {
+    sendingNow.value = false
+  }
 }
 
 async function doAssign() {
@@ -339,11 +568,13 @@ function intentLabel(intent) {
 
 onMounted(async () => {
   await Promise.all([load(), operatorApi.list().then((items) => { operators.value = items })])
-  refreshTimer = window.setInterval(load, 120000)
+  refreshTimer = window.setInterval(load, 30000)
+  countdownTimer = window.setInterval(() => { now.value = dayjs() }, 1000)
 })
 
 onUnmounted(() => {
   if (refreshTimer) window.clearInterval(refreshTimer)
+  if (countdownTimer) window.clearInterval(countdownTimer)
 })
 </script>
 
@@ -642,6 +873,18 @@ onUnmounted(() => {
 
 .manual-reply-alert {
   margin-top: 16px;
+  border-radius: 8px;
+}
+
+.auto-reply-card {
+  margin-top: 16px;
+  border: 1px solid #dbeafe;
+}
+
+.task-quote-list {
+  padding: 12px;
+  line-height: 1.7;
+  background: #f8fafc;
   border-radius: 8px;
 }
 

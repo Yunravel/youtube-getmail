@@ -7,7 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -175,8 +175,14 @@ def _stable_message_id(direction: str, fields: dict[str, Optional[str]]) -> str:
 
 
 def _get_or_create_kol(db: Session, email: str, name: str) -> tuple[Kol, bool]:
-    """返回 ``(kol, created)``。created=True 表示本次新建，可触发画像补全。"""
-    kol = db.query(Kol).filter(Kol.email == email).first()
+    """返回 ``(kol, created)``。created=True 表示本次新建，可触发画像补全。
+
+    查档必须覆盖 kol_email 别名表：达人换邮箱回信时新地址可能已是
+    既有 KOL 的别名，只查主表会重复建裸档（规范 §5.1）。
+    """
+    from services.email_utils import find_kol_by_any_email
+
+    kol = find_kol_by_any_email(db, email)
     if kol:
         return kol, False
     kol = Kol(
@@ -243,15 +249,31 @@ def _find_or_create_thread(
     return thread
 
 
-def _parse_datetime(value: Any) -> datetime:
-    if isinstance(value, (int, float)):
-        return datetime.utcfromtimestamp(value)
-    if isinstance(value, str):
+def _parse_datetime(value: Any) -> tuple[datetime, bool]:
+    """解析上游时间字段为库内基准（naive UTC）。
+
+    返回 ``(received_at, estimated)``。estimated=True 表示上游没给时间或给的
+    值解析不了，received_at 只是入库时刻的推算值，不代表邮件真实时间——
+    消费端（自动回复两小时新鲜度闸门）必须据此拒绝当"新邮件"处理。
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+            return datetime.utcfromtimestamp(value), False
+        except (OverflowError, OSError, ValueError):
+            pass
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             pass
-    return datetime.utcnow()
+        else:
+            if parsed.tzinfo is not None:
+                # 带偏移 → 先换算到 UTC 再去 tzinfo。旧实现直接丢弃偏移，
+                # +03:00 的 15 点被存成 UTC 15 点（实际是 UTC 12 点）。
+                return parsed.astimezone(timezone.utc).replace(tzinfo=None), False
+            # 无偏移的 naive 串按 UTC 解释（Snov 的时间基准是 UTC）。
+            return parsed, False
+    return datetime.utcnow(), True
 
 
 def analyze_inbound_message(message_id: int) -> None:
@@ -341,6 +363,7 @@ async def snov_webhook(
         campaign_id,
         campaign_name,
     )
+    received_at, received_at_estimated = _parse_datetime(fields["received_at"])
     message = Message(
         thread_id=thread.id,
         direction=direction,
@@ -352,7 +375,8 @@ async def snov_webhook(
         attachments=fields["attachments"],
         message_id=message_id,
         in_reply_to=fields["in_reply_to"],
-        received_at=_parse_datetime(fields["received_at"]),
+        received_at=received_at,
+        received_at_estimated=received_at_estimated,
     )
     db.add(message)
     db.flush()

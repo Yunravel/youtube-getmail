@@ -20,7 +20,7 @@ def _created_list_id(payload: Any) -> str:
         value = data.get("id") if isinstance(data, dict) else None
         if value not in (None, ""):
             return str(value)
-    raise SnovListCreateError(f"Snov 未返回新名单 ID: {payload!r}")
+    raise SnovListCreateError(f"营销平台未返回新名单 ID: {payload!r}")
 
 
 def _valid_email(value: Any) -> bool:
@@ -128,7 +128,7 @@ def create_snov_list_from_kols(
             snov_result = client.add_prospect_to_list(list_id, _prospect_payload(kol))
             if not isinstance(snov_result, dict) or not snov_result.get("success"):
                 reason = snov_result.get("errors") if isinstance(snov_result, dict) else snov_result
-                raise RuntimeError(str(reason or "Snov 返回添加失败"))
+                raise RuntimeError(str(reason or "营销平台返回添加失败"))
 
             outcome = "added" if snov_result.get("added") else (
                 "updated" if snov_result.get("updated") else "unchanged"

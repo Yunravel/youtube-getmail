@@ -121,7 +121,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { message as antMessage } from 'ant-design-vue'
 import { ReloadOutlined, RightOutlined, ThunderboltOutlined, DownloadOutlined } from '@ant-design/icons-vue'
-import { snovApi, threadApi } from '../api'
+import { campaignApi, threadApi } from '../api'
 
 const data = ref([])
 const campaigns = ref([])
@@ -259,7 +259,7 @@ function intentLabel(intent) {
 
 onMounted(async () => {
   try {
-    campaigns.value = await snovApi.campaigns()
+    campaigns.value = await campaignApi.campaigns()
   } catch {
     campaigns.value = []
   } finally {

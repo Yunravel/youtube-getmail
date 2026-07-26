@@ -179,6 +179,7 @@ python -m scripts.sync_snov_contacts
 | operator | 运营人员 |
 | note | 内部备注(运营间私聊) |
 | send_log | 历史发送日志表（当前由 Snov 同步 message 会话） |
+| feishu_sync_task | 飞书一达人一行的持久同步、错误重试和对账状态 |
 
 ## 🔌 API 速览
 
@@ -197,6 +198,11 @@ python -m scripts.sync_snov_contacts
 | POST | /api/threads/{id}/assign | 分配运营 |
 | POST | /api/webhook/snov | 接 Snov 已发/回信(回信自动 AI 分析) |
 | GET | /api/stats/overview | 总览统计 |
+| GET | /api/feishu/status | 飞书持久任务状态 |
+| GET | /api/feishu/audit | 只读对账：缺行、重复和字段差异统计 |
+| POST | /api/feishu/reconcile | 将所有有回信的达人加入全量对账队列 |
+| POST | /api/feishu/process | 立即处理当前到期的飞书任务 |
+| POST | /api/feishu/retry-conflicts | 重复行人工处理后重新释放冲突任务 |
 
 完整文档见 http://localhost:8000/docs
 
@@ -246,6 +252,50 @@ python -m scripts.reanalyze_messages --workers 4
 - 同步内容包含邮件主题、正文、KOL 邮箱和 Campaign 名称（任务名）。
 - Snov 当前公开的 Campaign 回复 API 不保证返回附件或附件下载地址。若 webhook 或未来 API 响应包含附件字段，中台会保存并展示文件名、类型、大小和安全下载地址；API 未返回时附件列表为空。
 - 如果业务必须获取所有附件文件，需要另行接入发信邮箱的 IMAP、Gmail API 或 Microsoft Graph，不能仅依赖 Snov Campaign 回复 API。
+
+### 飞书可靠同步
+
+飞书采用“一位达人一行”，数据库是权威数据源。同步按表头名称映射，不依赖
+固定 A–R 位置；`系统KOL ID` 是稳定行键，邮箱仅用于兼容历史行。目标表缺少
+这两个系统列时会自动追加。
+
+- 代理商、最近发稿、阅读、互动、认证和 CPM 是运营字段，更新达人时不会覆盖。
+- 达人画像按 KOL 主表的多个候选字段补齐；合作方式与报价从该达人全部回信中
+  取最新非空结果，后续无报价的回信不会清空历史报价。
+- 飞书四个业务列采用固定语义：`达人标签` 为每人 2–3 个内容标签；
+  `回信所属项目` 来自最新入站会话的 Snov Campaign；`完整报价` 汇总所有
+  平台、内容形式、套餐与数量阶梯；`最低报价` 从结构化金额中按币种分别取
+  最低值，不会把 USD、GBP、EUR 相互比较；`意向` 直接同步数据库最新回信
+  intent；时间字段只保留一个 `回信时间`。
+- `auto_reply` 和 `ooo` 属于无效自动回信，不进入最终飞书名单，也不参与
+  报价、意向或回信时间聚合；若同一达人后续收到真人回信，则以最新真人回信
+  重新进入同步。
+- 无可靠来源的数据写“待补全”“待分类”“待采集”“未确认”或“未提供”，
+  不留空、不编造。
+- 报价可来自邮件正文、本地 PDF/图片附件或受信任的公开报价页。PDF 优先读取
+  文本，扫描件和图片走 OCR，Canva、Passionfroot 等动态页面使用无登录浏览器
+  渲染；提取文本再交给报价专用 AI 提示词结构化，网页案例收入、订阅数据和
+  购物车 `$0` 不计为达人报价。
+- 同步失败写入 `feishu_sync_task`，按指数退避重试；服务重启不会丢任务。
+- 每 30 分钟把全部有回信的达人重新加入对账，配置项分别为
+  `FEISHU_SYNC_INTERVAL_SECONDS` 和 `FEISHU_RECONCILE_INTERVAL_SECONDS`。
+- 若飞书存在重复邮箱或重复系统 ID，同步会拒绝任选一行覆盖，并在任务错误中
+  标明冲突行号，任务进入 `conflict` 且不会自动重试；运营确认并清理重复行后
+  调用 `/api/feishu/retry-conflicts` 重新释放。
+
+## 报价自动回复
+
+该功能只对包含明确金额和币种的真实回信生效。正文、PDF、扫描 PDF 和常见图片报价单会被解析；无法可靠解析的任务会进入人工处理，不会自动发送。
+
+上线步骤：
+
+1. 在 `backend` 目录运行 `alembic upgrade head`。
+2. 重新构建后端镜像，以安装 Tesseract、PDF 和图片解析依赖。
+3. 打开“邮箱配置”，填写 SMTP 参数并逐个点击“测试 SMTP”（测试只登录和 NOOP，不发送邮件）。
+4. 保存并启用全局默认模板；需要时为具体 Snov Campaign 建覆盖模板。
+5. 最后开启“自动发送总开关”。该开关默认关闭。
+
+草稿在邮件到达后的 60–120 分钟窗口内随机发送。排队期间可在会话详情中预览、编辑或取消；新回信或外部人工出站邮件会自动取消旧任务。
 
 ## 📋 开发进度
 

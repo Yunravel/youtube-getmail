@@ -28,6 +28,10 @@
           <mail-outlined />
           <span>邮箱</span>
         </a-menu-item>
+        <a-menu-item key="/mailbox-settings">
+          <setting-outlined />
+          <span>邮箱配置</span>
+        </a-menu-item>
         <a-menu-item key="/kols">
           <team-outlined />
           <span>KOL 列表</span>
@@ -40,9 +44,9 @@
           <radar-chart-outlined />
           <span>采集 KOL</span>
         </a-menu-item>
-        <a-menu-item key="/mailbox-settings">
-          <setting-outlined />
-          <span>邮箱配置</span>
+        <a-menu-item key="/auto-replies">
+          <thunderbolt-outlined />
+          <span>自动回复</span>
         </a-menu-item>
         <a-menu-item key="/stats">
           <bar-chart-outlined />
@@ -71,11 +75,12 @@ import {
   DashboardOutlined,
   FireOutlined,
   MailOutlined,
+  SettingOutlined,
   TeamOutlined,
   UploadOutlined,
   RadarChartOutlined,
   BarChartOutlined,
-  SettingOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons-vue'
 
 const route = useRoute()
