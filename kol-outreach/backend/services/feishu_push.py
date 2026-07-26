@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 import httpx
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 
 from config import settings
 from db import SessionLocal
@@ -783,6 +784,14 @@ def _payload_hash(record: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _sync_task_for_kol(session, kol_id: int) -> Optional[FeishuSyncTask]:
+    return (
+        session.query(FeishuSyncTask)
+        .filter(FeishuSyncTask.kol_id == kol_id)
+        .one_or_none()
+    )
+
+
 def enqueue_message_sync(
     message_id: int,
     delay_seconds: int = 0,
@@ -802,20 +811,30 @@ def enqueue_message_sync(
         ):
             return False
         due = datetime.utcnow() + timedelta(seconds=max(0, delay_seconds))
-        task = (
-            session.query(FeishuSyncTask)
-            .filter(FeishuSyncTask.kol_id == message.thread.kol_id)
-            .one_or_none()
-        )
+        kol_id = message.thread.kol_id
+        task = _sync_task_for_kol(session, kol_id)
+        created = False
         if task is None:
-            task = FeishuSyncTask(
-                kol_id=message.thread.kol_id,
-                source_message_id=message.id,
-                status="pending",
-                next_retry_at=due,
-            )
-            session.add(task)
-        else:
+            # 并发入队同一 KOL 时双方都可能查不到既有任务；把插入包在
+            # SAVEPOINT 里，撞 kol_id 唯一约束就回滚这一小段并改走更新，
+            # 借用的外部 session 不会被污染。先 flush 让 SAVEPOINT 只含
+            # 这条插入，冲突不会被归因到外部 session 的其他改动上。
+            session.flush()
+            try:
+                with session.begin_nested():
+                    task = FeishuSyncTask(
+                        kol_id=kol_id,
+                        source_message_id=message.id,
+                        status="pending",
+                        next_retry_at=due,
+                    )
+                    session.add(task)
+                created = True
+            except IntegrityError:
+                task = _sync_task_for_kol(session, kol_id)
+                if task is None:
+                    raise
+        if not created:
             task.source_message_id = message.id
             # A known duplicate-row conflict requires an operator decision.
             # Periodic reconciliation must not turn it back into an endless

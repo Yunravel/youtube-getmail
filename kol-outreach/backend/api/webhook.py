@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -163,6 +164,10 @@ def _message_fields(payload: dict[str, Any], direction: str) -> dict[str, Option
             extract_links_from_text(raw_body),
         ),
     }
+
+
+def _existing_message(db: Session, message_id: str) -> Optional[Message]:
+    return db.query(Message).filter(Message.message_id == message_id).first()
 
 
 def _stable_message_id(direction: str, fields: dict[str, Optional[str]]) -> str:
@@ -327,45 +332,54 @@ async def snov_webhook(
         return {"status": "ignored", "reason": "no_email"}
 
     message_id = fields["message_id"] or _stable_message_id(direction, fields)
-    existing = db.query(Message).filter(Message.message_id == message_id).first()
-    if existing:
+    if _existing_message(db, message_id):
         return {"status": "duplicate", "message_id": message_id}
 
-    kol, kol_created = _get_or_create_kol(db, kol_email, _text(fields["kol_name"]))
-    campaign_id, campaign_name = _campaign_fields(payload)
-    thread = _find_or_create_thread(
-        db,
-        kol,
-        _text(fields["subject"]),
-        fields["in_reply_to"],
-        campaign_id,
-        campaign_name,
-    )
-    message = Message(
-        thread_id=thread.id,
-        direction=direction,
-        from_email=_text(fields["from_email"]),
-        to_email=_text(fields["to_email"]),
-        subject=_text(fields["subject"]),
-        body_text=_text(fields["body_text"]),
-        body_html=fields["body_html"],
-        attachments=fields["attachments"],
-        message_id=message_id,
-        in_reply_to=fields["in_reply_to"],
-        received_at=_parse_datetime(fields["received_at"]),
-    )
-    db.add(message)
-    db.flush()
-    if direction == "inbound":
-        from services.auto_reply import supersede_thread_tasks
-        supersede_thread_tasks(db, thread.id, message.id)
-        thread.reply_count = (thread.reply_count or 0) + 1
-        kol.status = "in_conversation"
-    else:
-        from services.auto_reply import cancel_for_outbound
-        cancel_for_outbound(db, thread.id)
-        kol.status = "sent"
-    db.commit()
+    try:
+        kol, kol_created = _get_or_create_kol(db, kol_email, _text(fields["kol_name"]))
+        campaign_id, campaign_name = _campaign_fields(payload)
+        thread = _find_or_create_thread(
+            db,
+            kol,
+            _text(fields["subject"]),
+            fields["in_reply_to"],
+            campaign_id,
+            campaign_name,
+        )
+        message = Message(
+            thread_id=thread.id,
+            direction=direction,
+            from_email=_text(fields["from_email"]),
+            to_email=_text(fields["to_email"]),
+            subject=_text(fields["subject"]),
+            body_text=_text(fields["body_text"]),
+            body_html=fields["body_html"],
+            attachments=fields["attachments"],
+            message_id=message_id,
+            in_reply_to=fields["in_reply_to"],
+            received_at=_parse_datetime(fields["received_at"]),
+        )
+        db.add(message)
+        db.flush()
+        if direction == "inbound":
+            from services.auto_reply import supersede_thread_tasks
+            supersede_thread_tasks(db, thread.id, message.id)
+            thread.reply_count = (thread.reply_count or 0) + 1
+            kol.status = "in_conversation"
+        else:
+            from services.auto_reply import cancel_for_outbound
+            cancel_for_outbound(db, thread.id)
+            kol.status = "sent"
+        db.commit()
+    except IntegrityError:
+        # Snov 并发重投同一事件：两个请求都通过了上面的去重检查后双双插入。
+        # 回滚后复查，确认唯一约束冲突真是重复投递才按 duplicate 吸收；
+        # 否则原样抛出，不掩盖真实的数据问题。
+        db.rollback()
+        if _existing_message(db, message_id) is None:
+            raise
+        logger.info("Snov webhook 并发重投已去重: %s", message_id)
+        return {"status": "duplicate", "message_id": message_id}
     db.refresh(message)
 
     if direction == "inbound":
