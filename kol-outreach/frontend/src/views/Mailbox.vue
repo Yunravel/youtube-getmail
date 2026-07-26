@@ -210,6 +210,7 @@ import { computed, markRaw, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import dayjs from 'dayjs'
+import { parseServerTime, formatServerTime } from '../utils/time'
 import {
   ClockCircleOutlined,
   ExclamationCircleOutlined,
@@ -412,7 +413,8 @@ function openCompose() {
 
 function formatTime(value) {
   if (!value) return '—'
-  const date = dayjs(value)
+  // 后端返回的是 naive UTC，需按 UTC 解析再转本地显示
+  const date = parseServerTime(value)
   const now = dayjs()
   if (date.isSame(now, 'day')) return date.format('HH:mm')
   if (date.isSame(now, 'year')) return date.format('M月D日')
@@ -420,7 +422,7 @@ function formatTime(value) {
 }
 
 function fullTime(value) {
-  return value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : ''
+  return formatServerTime(value, 'YYYY-MM-DD HH:mm:ss')
 }
 
 onMounted(async () => {

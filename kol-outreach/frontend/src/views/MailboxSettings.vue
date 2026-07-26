@@ -191,7 +191,7 @@ import {
   ReloadOutlined,
   SyncOutlined,
 } from '@ant-design/icons-vue'
-import dayjs from 'dayjs'
+import { formatServerTime } from '../utils/time'
 import { mailboxCredentialApi, attachmentApi } from '../api'
 
 const credentials = ref([])
@@ -405,7 +405,8 @@ const syncAlertType = computed(() => {
 })
 
 function formatTime(t) {
-  return t ? dayjs(t).format('MM-DD HH:mm') : ''
+  // 后端返回的 last_synced_at 是 naive UTC，需按 UTC 解析再转本地显示
+  return formatServerTime(t, 'MM-DD HH:mm')
 }
 
 onMounted(load)

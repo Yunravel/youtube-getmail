@@ -308,6 +308,7 @@ import {
 import dayjs from 'dayjs'
 import { useRoute } from 'vue-router'
 import { threadApi, operatorApi, autoReplyApi } from '../api'
+import { parseServerTime, formatServerTime } from '../utils/time'
 
 const route = useRoute()
 const backTarget = computed(() => route.query.from === 'mailbox' ? '/mailbox' : '/hot-leads')
@@ -370,14 +371,16 @@ async function load() {
     draftDirty.value = false
   }
   if (taskChanged || !specifiedSendAt.value) {
-    specifiedSendAt.value = task?.scheduled_at ? dayjs(task.scheduled_at) : dayjs().add(5, 'minute')
+    // 后端返回的 scheduled_at 是 naive UTC，必须按 UTC 解析再转本地；
+    // 否则回填进时间选择器会偏早 8 小时，提交时 toISOString() 又减 8 小时，每轮确认实际提前 8 小时
+    specifiedSendAt.value = task?.scheduled_at ? parseServerTime(task.scheduled_at) : dayjs().add(5, 'minute')
   }
   assigneeId.value = thread.value.thread.assignee_id
 }
 
 const countdownText = computed(() => {
   if (!replyTask.value?.scheduled_at) return ''
-  const seconds = Math.max(0, dayjs(replyTask.value.scheduled_at).diff(now.value, 'second'))
+  const seconds = Math.max(0, parseServerTime(replyTask.value.scheduled_at).diff(now.value, 'second'))
   const hours = Math.floor(seconds / 3600)
   const minutes = Math.floor((seconds % 3600) / 60)
   const secs = seconds % 60
@@ -525,7 +528,7 @@ function campaignLabel(source) {
 }
 
 function fmtTime(value) {
-  return value ? dayjs(value).format('YYYY 年 M 月 D 日 HH:mm') : '时间未知'
+  return formatServerTime(value, 'YYYY 年 M 月 D 日 HH:mm', '时间未知')
 }
 
 function formatBytes(value) {
