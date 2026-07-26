@@ -4,7 +4,7 @@ SQLAlchemy 2.0 风格
 """
 import logging
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import String, create_engine, event, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 from config import settings
@@ -37,6 +37,45 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # 所有 ORM 模型的基类
 Base = declarative_base()
+
+
+@event.listens_for(SessionLocal, "before_flush")
+def _truncate_oversized_strings(session, flush_context, instances):
+    """flush 前把超过 VARCHAR(n) 限长的字符串统一截断 —— ORM 层单点防线。
+
+    为什么放这里而不是各写入点:
+    - SQLite(本地开发库)不检查 VARCHAR 长度,超长值静默入库,开发时完全无感;
+      生产 PostgreSQL 会抛 StringDataRightTruncation → 接口 500。典型触发场景:
+      Snov webhook 送来超长邮件主题,500 后被 Snov 反复重投,形成持续报错。
+    - 入库路径很多(get_db 请求、webhook、IMAP ingest、CSV 导入、脚本),都经
+      db.SessionLocal 建 session,注册在 sessionmaker 工厂上的监听器全路径覆盖
+      (``SessionLocal(bind=其他引擎)`` 创建的 session 同样触发,测试正是靠这一点)。
+      在每个写入点各自截断既容易漏,也没必要。
+
+    截断只影响病态输入(正常业务值远短于限长)。message_id 这类去重键被截断
+    后理论上存在碰撞风险,但可接受——不截断的替代结局是整个请求 500,数据同样
+    丢失且伴随重投风暴。截断必须留观测痕迹(logger.warning),静默丢数据不可接受。
+
+    只处理映射为普通列属性的字符串列:mapper.column_attrs 天然排除 relationship/
+    synonym 等花活;Text 是 String 子类但 length 为 None,不会命中;JSON 列不受影响。
+    """
+    for obj in session.new | session.dirty:
+        state = inspect(obj)
+        mapper = state.mapper
+        for attr in mapper.column_attrs:
+            column = attr.columns[0]
+            if not isinstance(column.type, String) or not column.type.length:
+                continue
+            # 只看已加载/已赋值的属性(state.dict),避免触碰 deferred/expired
+            # 属性时触发额外的惰性加载——没加载过的属性也不可能带着超长新值。
+            value = state.dict.get(attr.key)
+            if not isinstance(value, str) or len(value) <= column.type.length:
+                continue
+            setattr(obj, attr.key, value[: column.type.length])
+            logger.warning(
+                "入库字符串超长,已截断: %s.%s 长度 %d → 限长 %d",
+                column.table.name, column.name, len(value), column.type.length,
+            )
 
 
 def get_db():
@@ -182,6 +221,10 @@ def _ensure_mailbox_schema():
             ))
         if "message" in table_names and "rfc_message_id" not in message_columns:
             connection.execute(text("ALTER TABLE message ADD COLUMN rfc_message_id VARCHAR(500)"))
+        if "message" in table_names and "received_at_estimated" not in message_columns:
+            connection.execute(text(
+                "ALTER TABLE message ADD COLUMN received_at_estimated BOOLEAN NOT NULL DEFAULT false"
+            ))
         if "mailbox_credential" in table_names:
             credential_additions = {
                 "smtp_host": "VARCHAR(100) NOT NULL DEFAULT 'smtp.gmail.com'",

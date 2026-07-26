@@ -9,11 +9,14 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from db import get_db
-from models import Kol
+from models import (
+    FeishuSyncTask, Kol, KolEmail, Message, Note, ProjectAssessment,
+    ScheduledReply, SendLog, Thread,
+)
 from services.country_normalize import normalize_country_for_storage
 from services.niche_normalize import classify_niche
 from services.email_utils import ensure_kol_email
@@ -252,6 +255,31 @@ def delete_kol(kol_id: int, db: Session = Depends(get_db)):
     kol = db.query(Kol).get(kol_id)
     if not kol:
         raise HTTPException(404, "KOL not found")
+
+    # thread.kol_id / send_log.kol_id / feishu_sync_task.kol_id 等外键没有
+    # ON DELETE CASCADE,PostgreSQL 会拒绝直接删 KOL(SQLite 开发库默认不查外键,
+    # 所以本地看不出来)。必须先删引用方:
+    # 引用 thread/message 的表 → message → thread → 引用 kol 的表 → kol 本体。
+    thread_ids = [tid for (tid,) in db.query(Thread.id).filter(Thread.kol_id == kol_id)]
+    if thread_ids:
+        db.query(ScheduledReply).filter(
+            ScheduledReply.thread_id.in_(thread_ids)
+        ).delete(synchronize_session=False)
+        db.query(Note).filter(Note.thread_id.in_(thread_ids)).delete(synchronize_session=False)
+    db.query(FeishuSyncTask).filter(FeishuSyncTask.kol_id == kol_id).delete(synchronize_session=False)
+    send_log_owned = SendLog.kol_id == kol_id
+    if thread_ids:
+        send_log_owned = or_(send_log_owned, SendLog.thread_id.in_(thread_ids))
+    db.query(SendLog).filter(send_log_owned).delete(synchronize_session=False)
+    if thread_ids:
+        db.query(Message).filter(Message.thread_id.in_(thread_ids)).delete(synchronize_session=False)
+        db.query(Thread).filter(Thread.id.in_(thread_ids)).delete(synchronize_session=False)
+    # kol_email / project_assessment 虽声明了 ondelete=CASCADE,但 SQLite 开发库
+    # 不执行,显式删除让两种库行为一致。
+    db.query(KolEmail).filter(KolEmail.kol_id == kol_id).delete(synchronize_session=False)
+    db.query(ProjectAssessment).filter(
+        ProjectAssessment.kol_id == kol_id
+    ).delete(synchronize_session=False)
     db.delete(kol)
     db.commit()
     return {"deleted": kol_id}
