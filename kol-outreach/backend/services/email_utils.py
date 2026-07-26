@@ -53,6 +53,12 @@ def ensure_kol_email(
     返回受影响的 :class:`KolEmail`，空邮箱或异常时返回 ``None``（不抛异常，由调用方
     决定是否中断业务；邮箱规范化失败不应阻塞 KOL 本身的创建）。
 
+    整段读写包在 SAVEPOINT（``db.begin_nested()``）里：``flush`` 失败（典型如并发
+    写入撞 ``uq_kol_email_kol_normalized`` 或 ``lower(trim(email))`` 唯一索引抛
+    IntegrityError）只回滚本函数内的写入，外层 session 保持可用。若只吞异常不设
+    SAVEPOINT，session 会停留在 pending-rollback 状态，调用方（如 CSV 导入循环）
+    下一次用同一 session 就抛 PendingRollbackError——"不阻塞调用方"的契约名存实亡。
+
     主邮箱唯一性目前仅在代码层保证（规范 §3.2 列为“未由数据库强制的约束”），
     未加 ``CHECK`` / 部分唯一索引，待业务确认语义后再单独 migration。
     """
@@ -61,43 +67,44 @@ def ensure_kol_email(
         return None
 
     try:
-        existing = (
-            db.query(KolEmail)
-            .filter(
-                KolEmail.kol_id == kol_id,
-                KolEmail.email_normalized == normalized,
+        with db.begin_nested():
+            existing = (
+                db.query(KolEmail)
+                .filter(
+                    KolEmail.kol_id == kol_id,
+                    KolEmail.email_normalized == normalized,
+                )
+                .first()
             )
-            .first()
-        )
 
-        if existing is not None:
-            if is_primary and not existing.is_primary:
-                # 提升为主邮箱前，清掉同 KOL 其他主邮箱行（代码层保证唯一）。
+            if existing is not None:
+                if is_primary and not existing.is_primary:
+                    # 提升为主邮箱前，清掉同 KOL 其他主邮箱行（代码层保证唯一）。
+                    db.query(KolEmail).filter(
+                        KolEmail.kol_id == kol_id,
+                        KolEmail.is_primary.is_(True),
+                        KolEmail.id != existing.id,
+                    ).update({KolEmail.is_primary: False}, synchronize_session=False)
+                    existing.is_primary = True
+                    db.flush()
+                return existing
+
+            if is_primary:
                 db.query(KolEmail).filter(
                     KolEmail.kol_id == kol_id,
                     KolEmail.is_primary.is_(True),
-                    KolEmail.id != existing.id,
                 ).update({KolEmail.is_primary: False}, synchronize_session=False)
-                existing.is_primary = True
-                db.flush()
-            return existing
 
-        if is_primary:
-            db.query(KolEmail).filter(
-                KolEmail.kol_id == kol_id,
-                KolEmail.is_primary.is_(True),
-            ).update({KolEmail.is_primary: False}, synchronize_session=False)
-
-        row = KolEmail(
-            kol_id=kol_id,
-            email=email.strip(),
-            email_normalized=normalized,
-            is_primary=is_primary,
-            source=source,
-        )
-        db.add(row)
-        db.flush()
-        return row
+            row = KolEmail(
+                kol_id=kol_id,
+                email=email.strip(),
+                email_normalized=normalized,
+                is_primary=is_primary,
+                source=source,
+            )
+            db.add(row)
+            db.flush()
+            return row
     except Exception as exc:  # noqa: BLE001 - 邮箱同步失败不应阻塞 KOL 创建
         logger.warning("ensure_kol_email 失败 kol_id=%s email=%r: %s", kol_id, email, exc)
         return None
